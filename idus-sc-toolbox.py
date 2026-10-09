@@ -40,6 +40,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
+APP_VERSION = "1.1"
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
 KEEP_BACKUPS = 15
@@ -487,15 +488,35 @@ def act_open_kwin_settings(log):
 
 
 # ---------------------------------------------------------------- action: shaders / audio
+SHADER_SUBDIRS = ("shaders", "vulkanshadercache")  # the big Vulkan cache lives in the latter
+
+
 def shader_targets(env: str, include_driver: bool):
     targets = []
+    # The real SC cache lives under AppData/Local/Star Citizen/<build>/{shaders,vulkanshadercache}
+    # where <build> is e.g. 'starcitizen_(sc-alpha-4.10.0)_qsmxke_0'. Descend into every build.
     sc_local = ifind(APPDATA_LOCAL, "Star Citizen")
     if sc_local:
-        targets += [p for p in sc_local.iterdir()
-                    if p.is_dir() and (p.name.lower().startswith("sc-alpha") or p.name.lower() == "shaders")]
+        for build in sc_local.iterdir():
+            if not build.is_dir():
+                continue
+            for sub in SHADER_SUBDIRS:
+                d = ifind(build, sub)
+                if d:
+                    targets.append(d)
+        # also catch caches sitting directly under 'Star Citizen' (older layouts)
+        for sub in SHADER_SUBDIRS:
+            d = ifind(sc_local, sub)
+            if d:
+                targets.append(d)
+    # Secondary cache inside the install dir
     sec = ifind(env_dir(env), "user", "client", "0", "shaders")
     if sec:
         targets.append(sec)
+    # Launcher shader cache in Roaming AppData (%APPDATA%\rsilauncher\shaders)
+    roaming = ifind(PREFIX, "drive_c", "users", WIN_USER, "AppData", "Roaming", "rsilauncher", "shaders")
+    if roaming:
+        targets.append(roaming)
     if include_driver:
         v = launch_sh_vars()
         for key in ["__GL_SHADER_DISK_CACHE_PATH", "MESA_SHADER_CACHE_DIR", "DXVK_STATE_CACHE_PATH"]:
@@ -611,6 +632,134 @@ def act_quantum(log, on: bool):
         + ("" if on else " (reset)"))
 
 
+# ---------------------------------------------------------------- VRAM check (NVIDIA)
+# Processes that count as "the game stack" rather than heavy extra apps.
+VRAM_GAME_HINTS = ("starcitizen", "rsi launcher", "wine", "explorer.exe", "winedevice")
+VRAM_DESKTOP_HINTS = ("kwin", "plasmashell", "xwayland", "xdg-desktop-portal", "opendeck",
+                      "idus-sc-toolbox", "python3")
+
+
+def vram_query():
+    """Returns (used_mib, total_mib, gpu_name) or None if nvidia-smi is unavailable."""
+    if not shutil.which("nvidia-smi"):
+        return None
+    r = subprocess.run(
+        ["nvidia-smi", "--query-gpu=memory.used,memory.total,name",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    parts = [p.strip() for p in r.stdout.strip().splitlines()[0].split(",")]
+    try:
+        return int(parts[0]), int(parts[1]), (parts[2] if len(parts) > 2 else "GPU")
+    except ValueError:
+        return None
+
+
+def vram_processes():
+    """List of (pid, mem_mib, name) for GPU processes, biggest first. [] if none/unavailable."""
+    if not shutil.which("nvidia-smi"):
+        return []
+    r = subprocess.run(
+        ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True)
+    procs = []
+    if r.returncode == 0 and r.stdout.strip():
+        for line in r.stdout.strip().splitlines():
+            cols = [c.strip() for c in line.split(",")]
+            if len(cols) >= 3:
+                try:
+                    procs.append((int(cols[0]), int(cols[1]), cols[2]))
+                except ValueError:
+                    pass
+    # compute-apps misses pure-graphics apps on some driver versions; fall back to
+    # parsing the full process table if we got nothing.
+    if not procs:
+        r = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
+        for line in r.stdout.splitlines():
+            m = re.search(r"\|\s+\d+\s+\S+\s+\S+\s+(\d+)\s+\S+\s+(.+?)\s+(\d+)MiB\s+\|", line)
+            if m:
+                procs.append((int(m.group(1)), int(m.group(3)), m.group(2).strip()))
+    procs.sort(key=lambda p: p[1], reverse=True)
+    return procs
+
+
+def vram_short_name(raw):
+    """Turn a full command line into a short app name.
+    'Z:\\...\\StarCitizen.exe' -> 'Star Citizen'; '/opt/brave-bin/brave --type=...' -> 'brave'."""
+    raw = (raw or "").strip()
+    m = re.search(r"(.*?\.exe)", raw, flags=re.I)        # Windows exe (handles spaces in path)
+    path = m.group(1) if m else re.split(r"\s+-", raw, maxsplit=1)[0]  # else cut at first arg
+    base = re.split(r"[\\/]", path)[-1]
+    base = re.sub(r"\.exe$", "", base, flags=re.I)
+    pretty = {"starcitizen": "Star Citizen", "rsi launcher": "RSI Launcher",
+              "kwin_wayland": "KWin", "plasmashell": "Plasma", "xwayland": "Xwayland"}
+    return pretty.get(base.lower(), base) or raw[:24]
+
+
+def vram_assessment():
+    """Returns a dict with everything the UI needs, or {'ok': False} if no NVIDIA GPU."""
+    q = vram_query()
+    if q is None:
+        return {"ok": False}
+    used, total, name = q
+    pct = used / total if total else 0
+    procs = vram_processes()
+
+    def classify(pname):
+        low = pname.lower()
+        if "starcitizen" in low:
+            return "sc"
+        if any(h in low for h in VRAM_GAME_HINTS):
+            return "game"
+        if any(h in low for h in VRAM_DESKTOP_HINTS):
+            return "desktop"
+        return "other"
+
+    tagged = [(pid, mem, nm, classify(nm)) for pid, mem, nm in procs]
+    # "heavy" = an extra (non-game, non-desktop) app using >10% of total VRAM
+    heavy = [p for p in tagged if p[3] == "other" and total and p[1] / total > 0.10]
+    sc_running = any(p[3] == "sc" for p in tagged)
+
+    free = total - used
+    # Verdict: SC wants ~10 GiB and can grow. Judge by free headroom + heavy extras.
+    if sc_running:
+        level, verdict = ("ok", "🟢 SC is running")
+    elif free >= 7000 and not heavy:
+        level, verdict = ("ok", "🟢 Plenty free — safe to launch")
+    elif free >= 4500:
+        level = "warn"
+        verdict = "🟡 Getting tight" + (" — close heavy apps first" if heavy else "")
+    else:
+        level, verdict = ("crit", "🔴 Free up VRAM before launching SC")
+    return {"ok": True, "used": used, "total": total, "free": free, "pct": pct,
+            "name": name, "level": level, "verdict": verdict,
+            "procs": tagged, "heavy": heavy}
+
+
+def act_vram(log):
+    a = vram_assessment()
+    if not a["ok"]:
+        log("❌ nvidia-smi not found — VRAM check needs an NVIDIA GPU.")
+        return
+    log(f"— VRAM: {a['name']} —")
+    log(f"  {a['used']/1024:.1f} / {a['total']/1024:.1f} GiB used ({a['pct']*100:.0f}%), "
+        f"{a['free']/1024:.1f} GiB free")
+    log(f"  {a['verdict']}")
+    if a["procs"]:
+        tot = a["total"]
+        log("  Top GPU processes:")
+        for pid, mem, nm, kind in a["procs"][:8]:
+            share = mem / tot if tot else 0
+            flag = " ⚠️ heavy extra app" if kind == "other" and share > 0.10 else ""
+            tag = {"sc": "[SC]", "game": "[game]", "desktop": "[desktop]", "other": ""}[kind]
+            log(f"    {mem/1024:5.1f} GiB ({share*100:3.0f}%)  {vram_short_name(nm)} {tag}{flag}")
+    if a["heavy"] and not any(p[3] == "sc" for p in a["procs"]):
+        names = ", ".join(sorted({vram_short_name(p[2]) for p in a["heavy"]}))
+        log(f"  💡 Close these before launching SC: {names}")
+
+
 # ---------------------------------------------------------------- CLI
 def cli():
     ap = argparse.ArgumentParser(description="Idus SC Toolbox (CLI mode)")
@@ -623,12 +772,13 @@ def cli():
     ap.add_argument("--shaders", action="store_true")
     ap.add_argument("--driver-cache", action="store_true")
     ap.add_argument("--starstrings", action="store_true")
+    ap.add_argument("--vram", action="store_true")
     ap.add_argument("--quantum", choices=["on", "off"])
     ap.add_argument("--env", default="LIVE")
     ap.add_argument("--screen", type=int, default=None)
     a = ap.parse_args()
     triggers = [a.kill, a.backup, a.restore is not None, a.diag, a.fix_windows,
-                a.kwin_rule, a.shaders, a.starstrings, a.quantum]
+                a.kwin_rule, a.shaders, a.starstrings, a.vram, a.quantum]
     if not any(triggers):
         return False
     if a.kill:
@@ -647,6 +797,8 @@ def cli():
         act_shaders(print, a.env, a.driver_cache)
     if a.starstrings:
         act_starstrings(print, a.env)
+    if a.vram:
+        act_vram(print)
     if a.quantum:
         act_quantum(print, a.quantum == "on")
     return True
@@ -656,7 +808,7 @@ def cli():
 def gui():
     import gi
     gi.require_version("Gtk", "4.0")
-    from gi.repository import Gtk, Gio, GLib  # noqa: E402
+    from gi.repository import Gtk, Gio, GLib, Pango  # noqa: E402
 
     settings = load_settings()
     S = 1.15
@@ -699,6 +851,9 @@ def gui():
             title = Gtk.Label(label="Idus SC Toolbox", xalign=0.5)
             title.add_css_class("app-title")
             hb.append(title)
+            ver = Gtk.Label(label=f"v{APP_VERSION}", xalign=0.5)
+            ver.add_css_class("app-ver")
+            hb.append(ver)
             root.append(hb)
 
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(8))
@@ -905,8 +1060,15 @@ def gui():
             self._btn(g, 1, 1, "↩️  Reset quantum",
                       lambda: self._run(act_quantum, False))
 
-            # 6 · StarStrings (english global.ini)
-            g = self._group(root, "6 · StarStrings")
+            # 6 · VRAM
+            g = self._group(root, "6 · VRAM")
+            self._btn(g, 0, 0, "📊  VRAM check",
+                      self._open_vram,
+                      "NVIDIA only. Shows GPU memory use with a meter and flags heavy apps "
+                      "(e.g. OrcaSlicer) to close before launching SC")
+
+            # 7 · StarStrings (english global.ini)
+            g = self._group(root, "7 · StarStrings")
             self._btn(g, 0, 0, "🌐  Update StarStrings (LIVE)",
                       lambda: self._confirm(
                           "Fetch the latest StarStrings (LIVE) and replace the english global.ini?\n\n"
@@ -914,6 +1076,131 @@ def gui():
                           lambda: self._run(act_starstrings, self.env())),
                       "Downloads the latest LIVE release from GitHub, backs up the old global.ini, "
                       "places the new one in data/Localization/english")
+
+        def _open_vram(self):
+            win = Gtk.Window(title="VRAM Check")
+            win.set_transient_for(self)
+            win.set_default_size(sc(460), sc(440))
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(12))
+            for s in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{s}")(sc(16))
+            win.set_child(box)
+
+            gpu_lbl = Gtk.Label(xalign=0)
+            gpu_lbl.add_css_class("vram-gpu")
+            box.append(gpu_lbl)
+
+            bar = Gtk.ProgressBar()
+            bar.set_show_text(True)
+            box.append(bar)
+
+            verdict = Gtk.Label(xalign=0)
+            verdict.add_css_class("vram-verdict")
+            box.append(verdict)
+
+            sep = Gtk.Separator()
+            box.append(sep)
+
+            proc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(6))
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_vexpand(True)
+            scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)  # no horizontal growth
+            scroller.set_child(proc_box)
+            box.append(scroller)
+
+            btns = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(8))
+            refresh = Gtk.Button(label="↻  Refresh")
+            refresh.set_hexpand(True)
+            close = Gtk.Button(label="Close")
+            close.set_hexpand(True)
+            close.connect("clicked", lambda _b: win.close())
+            btns.append(refresh)
+            btns.append(close)
+            box.append(btns)
+
+            note = Gtk.Label(label="NVIDIA only — reads nvidia-smi (any NVIDIA card).",
+                             xalign=0.5)
+            note.add_css_class("vram-note")
+            box.append(note)
+
+            def clear(container):
+                c = container.get_first_child()
+                while c:
+                    nxt = c.get_next_sibling()
+                    container.remove(c)
+                    c = nxt
+
+            def refresh_vram(*_):
+                a = vram_assessment()
+                clear(proc_box)
+                if not a["ok"]:
+                    gpu_lbl.set_text("No NVIDIA GPU detected")
+                    bar.set_fraction(0)
+                    bar.set_text("nvidia-smi not available")
+                    verdict.set_text("VRAM check works on NVIDIA GPUs only.")
+                    verdict.remove_css_class("vram-ok")
+                    verdict.remove_css_class("vram-warn")
+                    verdict.add_css_class("vram-crit")
+                    return
+                gpu_lbl.set_text(a["name"])
+                bar.set_fraction(min(a["pct"], 1.0))
+                bar.set_text(f"{a['used']/1024:.1f} / {a['total']/1024:.1f} GiB  "
+                             f"({a['pct']*100:.0f}%) · {a['free']/1024:.1f} GiB free")
+                for cls in ("vram-ok", "vram-warn", "vram-crit"):
+                    bar.remove_css_class(cls)
+                    verdict.remove_css_class(cls)
+                css = {"ok": "vram-ok", "warn": "vram-warn", "crit": "vram-crit"}[a["level"]]
+                bar.add_css_class(css)
+                verdict.add_css_class(css)
+                verdict.set_text(a["verdict"])
+                if a["procs"]:
+                    total = a["total"]
+                    for pid, mem, nm, kind in a["procs"][:10]:
+                        share = (mem / total) if total else 0
+                        # SC stays green (expected big user). Others: >20% red, >10% amber.
+                        if kind == "sc":
+                            lvl, name_cls, warn = "vram-sc", "vram-sc", False
+                        elif kind == "other" and share > 0.20:
+                            lvl, name_cls, warn = "vram-crit-bar", "vram-crit", True
+                        elif kind == "other" and share > 0.10:
+                            lvl, name_cls, warn = "vram-heavy-bar", "vram-heavy", True
+                        else:
+                            lvl, name_cls, warn = "vram-plain-bar", None, False
+                        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(8))
+
+                        # Warn icon in its own fixed slot — only shown when amber/red,
+                        # always aligned, never swallowed by the name ellipsis.
+                        warn_lbl = Gtk.Label(label="⚠️" if warn else "", xalign=0.5)
+                        warn_lbl.set_size_request(sc(18), -1)
+                        row.append(warn_lbl)
+
+                        name = Gtk.Label(label=vram_short_name(nm), xalign=0)
+                        name.set_ellipsize(Pango.EllipsizeMode.END)
+                        name.set_size_request(sc(118), -1)
+                        if name_cls:
+                            name.add_css_class(name_cls)
+                        row.append(name)
+
+                        pbar = Gtk.ProgressBar()
+                        pbar.set_fraction(min(share, 1.0))
+                        pbar.set_valign(Gtk.Align.CENTER)
+                        pbar.set_hexpand(True)
+                        pbar.add_css_class("vram-rowbar")
+                        pbar.add_css_class(lvl)
+                        row.append(pbar)
+
+                        size = Gtk.Label(label=f"{mem/1024:.1f} GiB", xalign=1)
+                        size.add_css_class("vram-size")
+                        size.set_size_request(sc(60), -1)
+                        row.append(size)
+
+                        proc_box.append(row)
+                else:
+                    proc_box.append(Gtk.Label(label="No GPU processes reported.", xalign=0))
+
+            refresh.connect("clicked", refresh_vram)
+            refresh_vram()
+            win.present()
 
         def _toggle_autobackup(self, chk):
             settings["autobackup"] = chk.get_active()
@@ -934,6 +1221,7 @@ def gui():
             css = f"""
             window {{ background-color: #16181d; color: #e8eaed; font-size: {f}px; }}
             .app-title {{ font-size: {int(28*S)}px; font-weight: 800; letter-spacing: 0.5px; color: #ffd9a0; }}
+            .app-ver {{ font-size: {int(11*S)}px; color: #8a93a3; margin-top: -{sc(2)}px; }}
             .foot {{ font-size: {int(11*S)}px; color: #8a93a3; margin-top: {sc(4)}px; }}
             .foot a {{ color: #ff9a3c; text-decoration: none; }}
             frame.group > label {{ font-size: {int(13*S)}px; font-weight: 700; color: #8a93a3;
@@ -947,6 +1235,27 @@ def gui():
             .logbox {{ background-color: #0f1115; color: #c7d1df; padding: {sc(8)}px;
                        border-radius: {sc(8)}px; }}
             checkbutton {{ color: #9fb4d4; font-size: {int(12*S)}px; }}
+            .vram-gpu {{ font-size: {int(15*S)}px; font-weight: 700; color: #e8eaed; }}
+            .vram-verdict {{ font-size: {int(14*S)}px; font-weight: 700; }}
+            progressbar text {{ color: #e8eaed; font-size: {int(12*S)}px; }}
+            progressbar.vram-ok progress   {{ background-color: #46d160; }}
+            progressbar.vram-warn progress {{ background-color: #ffb13c; }}
+            progressbar.vram-crit progress {{ background-color: #e0525b; }}
+            .vram-ok   {{ color: #46d160; }}
+            .vram-warn {{ color: #ffb13c; }}
+            .vram-crit {{ color: #e0525b; }}
+            .vram-size {{ font-family: monospace; color: #9fb4d4; font-size: {int(12*S)}px; }}
+            .vram-heavy {{ color: #ffb13c; font-weight: 700; }}
+            .vram-sc {{ color: #46d160; }}
+            .vram-note {{ font-size: {int(10*S)}px; color: #6b7280; }}
+            progressbar.vram-rowbar {{ min-height: {sc(6)}px; }}
+            progressbar.vram-rowbar trough {{ min-height: {sc(6)}px; border-radius: {sc(3)}px;
+                                              background-color: #0f1115; }}
+            progressbar.vram-rowbar progress {{ min-height: {sc(6)}px; border-radius: {sc(3)}px; }}
+            progressbar.vram-rowbar.vram-sc progress {{ background-color: #46d160; }}
+            progressbar.vram-rowbar.vram-heavy-bar progress {{ background-color: #ffb13c; }}
+            progressbar.vram-rowbar.vram-crit-bar progress {{ background-color: #e0525b; }}
+            progressbar.vram-rowbar.vram-plain-bar progress {{ background-color: #5a6270; }}
             """
             provider = _Gtk.CssProvider()
             provider.load_from_data(css.encode())

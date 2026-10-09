@@ -71,6 +71,7 @@ bash install-idus-sc-toolbox.sh
 | | Open Window Rules | Opens the KDE Window Rules settings |
 | Shaders & audio | Clear shader cache | Deletes SC shader cache (optionally the GPU driver cache too) |
 | | PipeWire quantum 2048 / Reset | Audio-stutter workaround |
+| VRAM | VRAM check | Visual meter of GPU memory with a per-process bar chart; flags heavy apps (e.g. OrcaSlicer) to close before launching SC. **NVIDIA only** |
 | StarStrings | Update StarStrings (LIVE) | Downloads the latest [StarStrings](https://github.com/MrKraken/StarStrings) LIVE release, backs up the old english `global.ini` → `global.ini.BAK-[date]`, installs the new one |
 
 ### CLI
@@ -79,7 +80,7 @@ Every action has a flag, for KDE global shortcuts or a Stream Deck:
 
 ```bash
 idus-sc-toolbox --kill | --fix-windows | --backup | --restore | --diag \
-                --starstrings | --kwin-rule | --shaders [--driver-cache] \
+                --starstrings | --vram | --kwin-rule | --shaders [--driver-cache] \
                 --quantum on|off | --env PTU | --screen N
 ```
 
@@ -91,6 +92,9 @@ idus-sc-toolbox --kill | --fix-windows | --backup | --restore | --diag \
 - **StarStrings also needs `USER.cfg`** (`g_language`) in the game root to take effect.
   The tool backs up and replaces the english `global.ini` only; it does not touch USER.cfg.
 - The KWin rule descriptions start with "SC Toolbox" for backwards compatibility.
+- **Hardware-specific features:** the VRAM check is **NVIDIA only** (reads `nvidia-smi`, any
+  NVIDIA card), and the joystick diagnostics are tuned for **VIRPIL** HOTAS. Everything else
+  is vendor-agnostic.
 - Not affiliated with Cloud Imperium Games or the LUG. Use at your own risk — it ships a
   backup button for a reason. 🙂
 
