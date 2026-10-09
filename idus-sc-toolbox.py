@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# ─────────────────────────────────────────────────────────────────────────────
+#  Idus SC Toolbox  ·  v1.1  ·  build 2026-10-09
+#  (bump APP_VERSION + BUILD below and this line together on every update)
+# ─────────────────────────────────────────────────────────────────────────────
 """
 Idus SC Toolbox — a small companion to LUG Helper for Star Citizen on Linux (KDE Plasma 6).
 GTK4. Self-contained folder: app + icon + settings live together, so one folder backup
@@ -41,6 +45,7 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
 APP_VERSION = "1.1"
+BUILD = "2026-10-09"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
 KEEP_BACKUPS = 15
@@ -851,7 +856,7 @@ def gui():
             title = Gtk.Label(label="Idus SC Toolbox", xalign=0.5)
             title.add_css_class("app-title")
             hb.append(title)
-            ver = Gtk.Label(label=f"v{APP_VERSION}", xalign=0.5)
+            ver = Gtk.Label(label=f"v{APP_VERSION} · {BUILD}", xalign=0.5)
             ver.add_css_class("app-ver")
             hb.append(ver)
             root.append(hb)
