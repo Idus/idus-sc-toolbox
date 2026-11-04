@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.2  ·  build 2026-11-04
+#  Idus SC Toolbox  ·  v1.2.1  ·  build 2026-11-04
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -46,7 +46,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.2"
+APP_VERSION = "1.2.1"
 BUILD = "2026-11-04"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
@@ -937,17 +937,22 @@ def gui():
             title = Gtk.Label(label="Idus SC Toolbox", xalign=0.5)
             title.add_css_class("app-title")
             hb.append(title)
-            ver = Gtk.Label(label=f"v{APP_VERSION} · {BUILD}", xalign=0.5)
+            ver = Gtk.Label(label=f"V{APP_VERSION} · BUILD {BUILD}", xalign=0.5)
             ver.add_css_class("app-ver")
             hb.append(ver)
             root.append(hb)
 
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(8))
-            top.append(Gtk.Label(label="Environment:"))
+            env_lbl = Gtk.Label(label="Environment:")
+            env_lbl.add_css_class("env-lbl")
+            top.append(env_lbl)
             self.env_box = Gtk.DropDown.new_from_strings(
                 [e for e in ENVIRONMENTS if ifind(GAME_ROOT, e)] or ["LIVE"])
             top.append(self.env_box)
-            self.status = Gtk.Label(label="", xalign=1, hexpand=True)
+            top.append(Gtk.Box(hexpand=True))
+            self.status = Gtk.Label(label="")
+            self.status.add_css_class("pill")
+            self.status.set_valign(Gtk.Align.CENTER)
             top.append(self.status)
             root.append(top)
 
@@ -957,6 +962,8 @@ def gui():
             self.log_buf.add_css_class("logbox")
             scroller = Gtk.ScrolledWindow()
             scroller.set_vexpand(True)
+            scroller.add_css_class("logwrap")
+            scroller.set_overflow(Gtk.Overflow.HIDDEN)
             scroller.set_child(self.log_buf)
 
             self._build_groups(root)
@@ -977,6 +984,7 @@ def gui():
 
             self._install_css()
             self._refresh_status()
+            self._font_hint()
             if not GAME_ROOT.is_dir():
                 self.log(f"❌ cannot find {GAME_ROOT} — set SC_PREFIX if the prefix is elsewhere")
 
@@ -1001,7 +1009,21 @@ def gui():
             GLib.idle_add(append)
 
         def _refresh_status(self):
-            self.status.set_label("🟢 SC running" if game_running() else "⚪ SC not running")
+            running = game_running()
+            self.status.set_label("●  SC running" if running else "○  SC not running")
+            self.status.remove_css_class("pill-idle" if running else "pill-ok")
+            self.status.add_css_class("pill-ok" if running else "pill-idle")
+
+        def _font_hint(self):
+            """The look needs Saira / IBM Plex Sans / JetBrains Mono (installed by the installer)."""
+            try:
+                fams = {f.get_name().lower() for f in self.get_pango_context().get_font_map().list_families()}
+            except Exception:
+                return
+            missing = [n for n in ("Saira", "IBM Plex Sans", "JetBrains Mono") if n.lower() not in fams]
+            if missing:
+                self.log("· fonts missing: " + ", ".join(missing)
+                         + " — run install-idus-sc-toolbox.sh again (system fonts used meanwhile)")
 
         def _run(self, fn, *args):
             for b in self._buttons:
@@ -1033,8 +1055,30 @@ def gui():
             return b
 
         def _group(self, root, title):
-            frame = Gtk.Frame(label=title)
+            """Framed group. "1 · Name → extra" becomes an orange number ring + title (+ muted extra)."""
+            frame = Gtk.Frame()
             frame.add_css_class("group")
+            num, _, name = title.partition(" · ")
+            if not name:
+                num, name = "", title
+            head = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(8))
+            head.add_css_class("group-head")
+            if num:
+                ring = Gtk.Label(label=num)
+                ring.add_css_class("group-num")
+                ring.set_valign(Gtk.Align.CENTER)
+                head.append(ring)
+            main, arrow, extra = name.partition("→")
+            name_lbl = Gtk.Label(label=main.strip(), xalign=0)
+            name_lbl.add_css_class("group-title")
+            name_lbl.set_valign(Gtk.Align.CENTER)
+            head.append(name_lbl)
+            if arrow:
+                extra_lbl = Gtk.Label(label="→  " + extra.strip(), xalign=0)
+                extra_lbl.add_css_class("group-extra")
+                extra_lbl.set_valign(Gtk.Align.CENTER)
+                head.append(extra_lbl)
+            frame.set_label_widget(head)
             grid = Gtk.Grid(column_spacing=sc(8), row_spacing=sc(8),
                             column_homogeneous=True)
             for s in ("top", "bottom", "start", "end"):
@@ -1307,44 +1351,77 @@ def gui():
         def _install_css(self):
             from gi.repository import Gtk as _Gtk
             f = int(round(13 * S))
+            # Idus visual style (same tokens as the Idus web pages): dark blue-grey ground,
+            # amber title, orange only for markers/details, blue-grey soft text.
+            C = dict(bg="#16181d", surface="#1e222b", deep="#0f1115", line="#2a2f3a",
+                     fg="#e8eaed", muted="#8a93a3", soft="#9fb4d4", title="#ffd9a0",
+                     accent="#ff9a3c", ok="#46d160", warn="#ffb13c", error="#e0525b",
+                     btn="#262b36", btn_hover="#2f3644", log="#c7d1df", dim="#5a6270")
+            DISPLAY = '"Saira", "Segoe UI", sans-serif'
+            BODY = '"IBM Plex Sans", "Noto Sans", sans-serif'
+            MONO = '"JetBrains Mono", "DejaVu Sans Mono", monospace'
             css = f"""
-            window {{ background-color: #16181d; color: #e8eaed; font-size: {f}px; }}
-            .app-title {{ font-size: {int(28*S)}px; font-weight: 800; letter-spacing: 0.5px; color: #ffd9a0; }}
-            .app-ver {{ font-size: {int(11*S)}px; color: #8a93a3; margin-top: -{sc(2)}px; }}
-            .foot {{ font-size: {int(11*S)}px; color: #8a93a3; margin-top: {sc(4)}px; }}
-            .foot a {{ color: #ff9a3c; text-decoration: none; }}
-            frame.group > label {{ font-size: {int(13*S)}px; font-weight: 700; color: #8a93a3;
-                                   margin-left: {sc(4)}px; }}
-            frame.group {{ background-color: #1e222b; border-radius: {sc(12)}px;
-                           border: 1px solid #2a2f3a; }}
-            button {{ background-color: #262b36; color: #e8eaed; border-radius: {sc(8)}px;
-                      border: 1px solid #333a47; padding: {sc(9)}px {sc(10)}px; }}
-            button:hover {{ background-color: #2f3644; }}
-            button:disabled {{ color: #5a6270; }}
-            .logbox {{ background-color: #0f1115; color: #c7d1df; padding: {sc(8)}px;
-                       border-radius: {sc(8)}px; }}
-            checkbutton {{ color: #9fb4d4; font-size: {int(12*S)}px; }}
-            .vram-gpu {{ font-size: {int(15*S)}px; font-weight: 700; color: #e8eaed; }}
+            window {{ background-color: {C['bg']}; color: {C['fg']}; font-family: {BODY}; font-size: {f}px; }}
+            .app-title {{ font-family: {DISPLAY}; font-size: {int(30*S)}px; font-weight: 700;
+                          letter-spacing: 0.3px; color: {C['title']}; }}
+            .app-ver {{ font-family: {MONO}; font-size: {int(11*S)}px; font-weight: 500;
+                        letter-spacing: 1px; color: {C['muted']}; }}
+            .env-lbl {{ color: {C['muted']}; }}
+            .pill {{ font-size: {int(12*S)}px; padding: {sc(3)}px {sc(10)}px; border-radius: 999px;
+                     border: 1px solid {C['line']}; background-color: {C['surface']}; }}
+            .pill-ok {{ color: {C['ok']}; border-color: {C['ok']}; }}
+            .pill-idle {{ color: {C['muted']}; }}
+            frame.group {{ background-color: {C['surface']}; border-radius: {sc(12)}px;
+                           border: 1px solid {C['line']}; }}
+            .group-head {{ margin: {sc(8)}px {sc(4)}px {sc(2)}px {sc(4)}px; }}
+            .group-num {{ font-family: {MONO}; font-weight: 600; font-size: {int(12*S)}px; color: {C['accent']};
+                          border: 1.5px solid {C['accent']}; border-radius: 999px;
+                          min-width: {sc(22)}px; min-height: {sc(22)}px; }}
+            .group-title {{ font-size: {int(14*S)}px; font-weight: 600; color: {C['fg']}; }}
+            .group-extra {{ font-family: {MONO}; font-size: {int(11.5*S)}px; color: {C['muted']}; }}
+            button {{ background-color: {C['btn']}; background-image: none; box-shadow: none; text-shadow: none;
+                      color: {C['fg']}; border-radius: {sc(8)}px; border: 1px solid {C['line']};
+                      padding: {sc(9)}px {sc(10)}px; }}
+            button:hover {{ background-color: {C['btn_hover']}; }}
+            button:active {{ background-color: {C['line']}; }}
+            button:focus-visible {{ outline: 2px solid {C['accent']}; outline-offset: 2px; }}
+            button:disabled {{ color: {C['dim']}; }}
+            checkbutton {{ color: {C['soft']}; font-size: {int(12*S)}px; }}
+            checkbutton check {{ background-color: {C['deep']}; background-image: none;
+                                 border: 1px solid {C['line']}; box-shadow: none; }}
+            checkbutton check:checked {{ background-color: {C['accent']}; border-color: {C['accent']};
+                                         color: {C['bg']}; }}
+            popover > contents, popover > arrow {{ background-color: {C['surface']}; color: {C['fg']};
+                                                   border-color: {C['line']}; }}
+            popover row:hover, popover row:selected {{ background-color: {C['btn_hover']}; }}
+            .logwrap {{ border: 1px solid {C['line']}; border-radius: {sc(8)}px; background-color: {C['deep']}; }}
+            textview.logbox, textview.logbox text {{ background-color: {C['deep']}; color: {C['log']}; }}
+            textview.logbox {{ font-family: {MONO}; font-size: {int(12*S)}px; padding: {sc(8)}px; }}
+            textview.logbox text selection {{ background-color: alpha({C['accent']}, 0.35); }}
+            .foot {{ font-size: {int(11*S)}px; color: {C['muted']}; margin-top: {sc(4)}px; }}
+            .foot link, .foot link:visited, .foot link:hover {{ color: {C['accent']}; }}
+            .foot link:focus-visible {{ outline: 1px solid {C['accent']}; outline-offset: 1px; }}
+            .vram-gpu {{ font-size: {int(15*S)}px; font-weight: 700; color: {C['fg']}; }}
             .vram-verdict {{ font-size: {int(14*S)}px; font-weight: 700; }}
-            progressbar text {{ color: #e8eaed; font-size: {int(12*S)}px; }}
-            progressbar.vram-ok progress   {{ background-color: #46d160; }}
-            progressbar.vram-warn progress {{ background-color: #ffb13c; }}
-            progressbar.vram-crit progress {{ background-color: #e0525b; }}
-            .vram-ok   {{ color: #46d160; }}
-            .vram-warn {{ color: #ffb13c; }}
-            .vram-crit {{ color: #e0525b; }}
-            .vram-size {{ font-family: monospace; color: #9fb4d4; font-size: {int(12*S)}px; }}
-            .vram-heavy {{ color: #ffb13c; font-weight: 700; }}
-            .vram-sc {{ color: #46d160; }}
+            progressbar text {{ color: {C['fg']}; font-size: {int(12*S)}px; }}
+            progressbar.vram-ok progress   {{ background-color: {C['ok']}; }}
+            progressbar.vram-warn progress {{ background-color: {C['warn']}; }}
+            progressbar.vram-crit progress {{ background-color: {C['error']}; }}
+            .vram-ok   {{ color: {C['ok']}; }}
+            .vram-warn {{ color: {C['warn']}; }}
+            .vram-crit {{ color: {C['error']}; }}
+            .vram-size {{ font-family: {MONO}; color: {C['soft']}; font-size: {int(12*S)}px; }}
+            .vram-heavy {{ color: {C['warn']}; font-weight: 700; }}
+            .vram-sc {{ color: {C['ok']}; }}
             .vram-note {{ font-size: {int(10*S)}px; color: #6b7280; }}
             progressbar.vram-rowbar {{ min-height: {sc(6)}px; }}
             progressbar.vram-rowbar trough {{ min-height: {sc(6)}px; border-radius: {sc(3)}px;
-                                              background-color: #0f1115; }}
+                                              background-color: {C['deep']}; }}
             progressbar.vram-rowbar progress {{ min-height: {sc(6)}px; border-radius: {sc(3)}px; }}
-            progressbar.vram-rowbar.vram-sc progress {{ background-color: #46d160; }}
-            progressbar.vram-rowbar.vram-heavy-bar progress {{ background-color: #ffb13c; }}
-            progressbar.vram-rowbar.vram-crit-bar progress {{ background-color: #e0525b; }}
-            progressbar.vram-rowbar.vram-plain-bar progress {{ background-color: #5a6270; }}
+            progressbar.vram-rowbar.vram-sc progress {{ background-color: {C['ok']}; }}
+            progressbar.vram-rowbar.vram-heavy-bar progress {{ background-color: {C['warn']}; }}
+            progressbar.vram-rowbar.vram-crit-bar progress {{ background-color: {C['error']}; }}
+            progressbar.vram-rowbar.vram-plain-bar progress {{ background-color: {C['dim']}; }}
             """
             provider = _Gtk.CssProvider()
             provider.load_from_data(css.encode())

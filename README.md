@@ -36,6 +36,9 @@ breaks mid-session.
 - KDE Plasma 6 (Wayland or X11)
 - Python + GTK4 bindings: `sudo pacman -S --needed python-gobject gtk4`
 - A LUG-Helper install of Star Citizen (the Wine prefix is auto-detected from its config)
+- Fonts [Saira](https://fonts.google.com/specimen/Saira), [IBM Plex Sans](https://fonts.google.com/specimen/IBM+Plex+Sans)
+  and [JetBrains Mono](https://fonts.google.com/specimen/JetBrains+Mono). The installer downloads any that are
+  missing to `~/.local/share/fonts/idus` (no sudo). Without them the app uses system fonts.
 
 ## Install
 
@@ -140,6 +143,7 @@ and starts nothing, so it never quietly patches on the wrong runner.
 ```bash
 rm -f  ~/.local/bin/idus-sc-toolbox ~/.local/share/applications/idus-sc-toolbox.desktop
 rm -rf ~/.local/share/idus-sc-toolbox ~/.local/share/icons/hicolor/512x512/apps/idus-sc-toolbox.png
+rm -rf ~/.local/share/fonts/idus   # fonts the installer downloaded (skip if other Idus apps use them)
 ```
 
 ## Support

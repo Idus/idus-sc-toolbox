@@ -1,7 +1,23 @@
 # Changelog
 
 All notable changes to Idus SC Toolbox are documented here.
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
+
+## [1.2.1] - 2026-11-04
+
+### Changed
+- 🎨 New look, following the Idus visual style:
+  - Saira for the title, IBM Plex Sans for text, JetBrains Mono for the version line and the log.
+  - Group headings get an orange number ring and a clear title. The backup path sits muted next to its title.
+  - The SC status is a pill: green "● SC running" or muted "○ SC not running".
+  - Log box, checkboxes and the environment menu use the same palette. Orange is kept for markers, links and focus.
+- The installer downloads the three fonts to `~/.local/share/fonts/idus` when they are missing (no sudo,
+  SIL Open Font License). Without them the app uses system fonts and says so in the log.
+
+### Fixed
+- Buttons and the environment menu stay dark on GTK themes that paint buttons with a background image
+  (e.g. the default GTK theme), where they used to turn white.
+- Footer links are orange as intended. GTK4 ignored the old `a` selector.
 
 ## [1.2] - 2026-11-04
 

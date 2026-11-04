@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idus SC Toolbox installer  ·  v1.1  ·  build 2026-10-09
+# Idus SC Toolbox installer  ·  v1.2.1  ·  build 2026-11-04
 # Installs Idus SC Toolbox (GTK4) as a self-contained folder in ~/.local/share/idus-sc-toolbox
 # + a start-menu entry with icon and right-click actions.
 # The Wine prefix is auto-detected from the LUG config → works on any machine.
@@ -46,6 +46,28 @@ if [ -n "$ICON_SRC" ]; then
 else
     echo "⚠️  no icon PNG found next to the script — using a generic game icon."
     ICON_LINE="Icon=applications-games"
+fi
+
+# Fonts for the Idus look: Saira (title), IBM Plex Sans (text), JetBrains Mono (log).
+# User-level (no sudo), from Google Fonts' GitHub (SIL Open Font License). Skipped when the
+# family is already installed; a failed download is not fatal (the app uses system fonts).
+FONTS="$HOME/.local/share/fonts/idus"
+GF="https://raw.githubusercontent.com/google/fonts/main/ofl"
+FONT_NEW=0
+fetch_font() {  # $1 family  $2 path under ofl/  $3 local file name
+    fc-list : family 2>/dev/null | grep -qi "^$1" && return 0
+    mkdir -p "$FONTS"
+    if curl -fsSL --max-time 60 -o "$FONTS/$3" "$GF/$2"; then
+        echo "   + font: $1"; FONT_NEW=1
+    else
+        rm -f "$FONTS/$3"; echo "⚠️  could not download the $1 font — the app falls back to a system font."
+    fi
+}
+if command -v curl >/dev/null 2>&1 && command -v fc-list >/dev/null 2>&1; then
+    fetch_font "Saira" "saira/Saira%5Bwdth,wght%5D.ttf" "Saira[wdth,wght].ttf"
+    fetch_font "IBM Plex Sans" "ibmplexsans/IBMPlexSans%5Bwdth,wght%5D.ttf" "IBMPlexSans[wdth,wght].ttf"
+    fetch_font "JetBrains Mono" "jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf" "JetBrainsMono[wght].ttf"
+    if [ "$FONT_NEW" = 1 ]; then fc-cache -f "$FONTS" >/dev/null 2>&1 || true; fi
 fi
 
 # PATH wrapper with baked-in paths
@@ -105,6 +127,7 @@ echo "   • Prefix (auto):  SC_PREFIX=$SC_PREFIX"
 echo "   • Launch: search 'Idus SC Toolbox' in the menu, or run 'idus-sc-toolbox' in a terminal."
 echo "   • Wrong prefix? Run:  SC_PREFIX=/your/path bash install-idus-sc-toolbox.sh"
 echo "   • New icon not showing? Log out/in (the icon cache is stubborn)."
+echo "   • Fonts: Saira, IBM Plex Sans, JetBrains Mono (in ~/.local/share/fonts/idus if downloaded)."
 echo
 echo "   NOTE: the old 'sc-toolbox' install (if any) is left in place. To remove it:"
 echo "     rm -f ~/.local/bin/sc-toolbox ~/.local/share/applications/sc-toolbox.desktop"
