@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.2.1  ·  build 2026-11-04
+#  Idus SC Toolbox  ·  v1.3  ·  build 2026-11-04
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -9,6 +9,8 @@ GTK4. Self-contained folder: app + icon + settings live together, so one folder 
 captures everything.
 
 GUI launches with no arguments. Same actions via CLI (KDE shortcuts / Stream Deck):
+  idus-sc-toolbox --status          Status: runners, wineserver, game build, disk, launcher log, audio
+  idus-sc-toolbox --launch          ▶ Launch: checks RSI for a launcher update first (→ patch mode)
   idus-sc-toolbox --kill            Close SC + launcher + wineserver
   idus-sc-toolbox --restart         Kill everything, then run sc-launch.sh (play)
   idus-sc-toolbox --restart-patch   Kill everything, then run "sc-launch.sh patch" (PATCH runner)
@@ -46,7 +48,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.3"
 BUILD = "2026-11-04"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
@@ -223,6 +225,266 @@ def act_start_launcher(log, patch=False):
     else:
         bins = runner_bins()
         log("✅ started sc-launch.sh" + (f" → {Path(bins[0]).parent.name}" if bins else ""))
+
+
+# ---------------------------------------------------------------- status panel (read-only)
+DISK_WARN_GB = 50  # free space on the prefix disk below this is flagged (patches need room)
+
+
+def runner_short(bin_dir) -> str:
+    """'…/lug-wine-tkg-staging-experimental-wayland-git-11.17-1/bin' → '11.17-1 wayland'."""
+    name = Path(bin_dir).parent.name
+    m = re.search(r"(\d+\.\d+(?:[.-]\d+)*)$", name)
+    ver = m.group(1) if m else name
+    flavour = "wayland" if "wayland" in name else ("staging" if "staging" in name else "")
+    return f"{ver} {flavour}".strip()
+
+
+def running_wineservers() -> list:
+    """Bin dir of every running wineserver ('' when it was started without a path)."""
+    r = subprocess.run(["pgrep", "-a", "wineserver"], capture_output=True, text=True)
+    out = []
+    for line in r.stdout.splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2:
+            exe = parts[1].split()[0]
+            out.append(str(Path(exe).parent) if "/" in exe else "")
+    return out
+
+
+def game_build(env="LIVE"):
+    """(version, build) from <env>/build_manifest.id, e.g. ('4.10.2', '12913470'); ('', '') if unknown."""
+    f = ifind(env_dir(env), "build_manifest.id")
+    if not f:
+        return "", ""
+    try:
+        d = json.loads(f.read_text(errors="ignore")).get("Data", {})
+    except Exception:
+        return "", ""
+    ver = re.sub(r"^sc-alpha-", "", str(d.get("Branch", ""))).strip()
+    return ver, str(d.get("RequestedP4ChangeNum", "")).strip()
+
+
+def launcher_log_file():
+    return ifind(PREFIX, "drive_c", "users", WIN_USER, "AppData", "Roaming",
+                 "rsilauncher", "logs", "log.log")
+
+
+RSI_LATEST_YML = os.environ.get("SC_LAUNCHER_YML",
+                                "https://install.robertsspaceindustries.com/rel/2/latest.yml")
+_LATEST_CACHE = {"t": 0.0, "val": ("", "")}
+LOG_LINE_RE = re.compile(r'"t":"([^"]+)",\s*"\[[^\]]*\]\[(\w+)\]\s*":\s*"(.*)"\s*}')
+
+
+def vtuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or ""))
+
+
+def installed_launcher_version() -> str:
+    """'2.19.1' from the RSI Launcher uninstall entry in the prefix registry ('' if not found)."""
+    for reg in ("user.reg", "system.reg"):
+        try:
+            txt = (PREFIX / reg).read_text(errors="ignore")
+        except OSError:
+            continue
+        for block in txt.split("\n["):
+            if '"DisplayName"="RSI Launcher' in block:
+                m = re.search(r'"DisplayVersion"="([^"]+)"', block)
+                if m:
+                    return m.group(1)
+    return ""
+
+
+def latest_launcher_version(timeout=5, max_age=600):
+    """(version, '') from RSI's public latest.yml (the file LUG Helper installs from),
+    or ('', reason). Cached for max_age seconds; max_age=0 forces a fresh check."""
+    if max_age and time.time() - _LATEST_CACHE["t"] < max_age:
+        return _LATEST_CACHE["val"]
+    try:
+        req = urllib.request.Request(RSI_LATEST_YML, headers={"User-Agent": "Idus-SC-Toolbox"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            txt = r.read(65536).decode(errors="ignore")
+        m = re.search(r"^version:\s*['\"]?([\d.]+)", txt, re.M) or re.search(r"Setup-([\d.]+)\.exe", txt)
+        val = (m.group(1), "") if m else ("", "unexpected latest.yml format")
+    except Exception as e:  # offline, DNS, timeout …
+        val = ("", (str(getattr(e, "reason", "")) or str(e))[:60])
+    _LATEST_CACHE.update(t=time.time(), val=val)
+    return val
+
+
+def launcher_log_events(max_bytes=600_000):
+    """[(datetime, level, message)] from the end of the RSI Launcher log, None if there is no log."""
+    f = launcher_log_file()
+    if not f:
+        return None
+    try:
+        size = f.stat().st_size
+        with open(f, "rb") as fh:
+            fh.seek(max(0, size - max_bytes))
+            lines = fh.read().decode(errors="ignore").splitlines()
+    except OSError:
+        return None
+    out = []
+    for line in lines:
+        m = LOG_LINE_RE.search(line)
+        if m:
+            try:
+                out.append((dt.datetime.strptime(m.group(1)[:19], "%Y-%m-%d %H:%M:%S"), m.group(2), m.group(3)))
+            except ValueError:
+                pass
+    return out
+
+
+def launcher_log_state(env="LIVE"):
+    """(state, value, detail). The log keeps old errors, so an error only counts while the
+    game files (build_manifest.id) are older than it, i.e. no patch has finished since."""
+    ev = launcher_log_events()
+    if ev is None:
+        return "idle", "no log yet", "appears after the first launcher start"
+    errs = [e for e in ev if "did not converge" in e[2] or "ERR_PATCHER" in e[2]]
+    if not errs:
+        return "ok", "no patch errors", f"{len(ev)} recent log lines checked"
+    when, _lvl, msg = errs[-1]
+    kind = "verify loop" if "did not converge" in msg else "patch error"
+    mf = ifind(env_dir(env), "build_manifest.id")
+    if mf and dt.datetime.fromtimestamp(mf.stat().st_mtime) > when:
+        return "ok", "patched since", f"{kind} {when:%m-%d %H:%M} · game updated after"
+    return "warn", kind, f"{when:%m-%d %H:%M} · use 🩹 Patch / verify"
+
+
+def launcher_update_state():
+    """(state, value, detail) for the RSI Launcher tile."""
+    inst = installed_launcher_version()
+    latest, err = latest_launcher_version()
+    if not inst:
+        return "idle", "not found", "no RSI Launcher entry in the prefix registry"
+    if latest and vtuple(latest) > vtuple(inst):
+        return "warn", f"{inst} → {latest}", "update out · ▶ Launch uses patch mode"
+    if latest:
+        return "ok", inst, "up to date (checked with RSI)"
+    return "idle", inst, f"update check offline · {err}" if err else "update check offline"
+
+
+def quantum_state():
+    """Forced PipeWire quantum: int (0 = not forced) or None if pw-metadata is missing."""
+    if not shutil.which("pw-metadata"):
+        return None
+    try:
+        r = subprocess.run(["pw-metadata", "-n", "settings", "0", "clock.force-quantum"],
+                           capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    m = re.search(r"value:'(\d+)'", r.stdout)
+    return int(m.group(1)) if m else 0
+
+
+def mount_point(p: Path) -> Path:
+    p = Path(p).resolve()
+    while not os.path.ismount(p) and p != p.parent:
+        p = p.parent
+    return p
+
+
+def status_snapshot(env="LIVE") -> list:
+    """Tiles for the status panel / --status: dicts with key, label, value, detail, state
+    (ok | warn | error | idle) and, for the disk tile, frac (0..1 used)."""
+    tiles = []
+    v = launch_sh_vars()
+    bins = runner_bins()
+    play = bins[0] if bins else None
+    lang = v.get("LANG", "")
+    xim = v.get("GTK_IM_MODULE", "").lower() == "xim" or v.get("XMODIFIERS", "") == "@im=none"
+    locale = " · ".join(x for x in (lang, "XIM (åäö)" if xim else "") if x) or "system locale"
+    tiles.append(dict(key="play", label="PLAY RUNNER",
+                      value=runner_short(play) if play else "system Wine",
+                      detail=locale if play else "no runner set in sc-launch.sh",
+                      state="ok" if play else "idle"))
+
+    has_patch = launch_sh_has_patch()
+    pw = v.get("patch_wine_path", "")
+    pw_ok = bool(has_patch and pw and "$" not in pw and (Path(pw) / "wine").exists())
+    if pw_ok:
+        tiles.append(dict(key="patch", label="PATCH RUNNER", value=runner_short(pw),
+                          detail="used by 🩹 Patch / verify", state="ok"))
+    else:
+        tiles.append(dict(key="patch", label="PATCH RUNNER",
+                          value="runner missing" if has_patch else "not set up",
+                          detail=pw if has_patch else "optional · README → Patch mode",
+                          state="warn" if has_patch else "idle"))
+
+    running = running_wineservers()
+    if not running:
+        tiles.append(dict(key="wine", label="WINESERVER NOW", value="not running",
+                          detail="starts with the launcher", state="idle"))
+    else:
+        names = []
+        for r in running:
+            if r and r in bins:
+                names.append(f"{runner_short(r).split()[0]} · {'play' if r == play else 'patch'}")
+            else:
+                names.append("other Wine")
+        clean = len(running) == 1 and names[0] != "other Wine"
+        tiles.append(dict(key="wine", label="WINESERVER NOW", value=" + ".join(names),
+                          detail="1 server" if clean else f"{len(running)} servers · 💀 Kill stops all",
+                          state="ok" if clean else "warn"))
+
+    ver, build = game_build(env)
+    tiles.append(dict(key="game", label=f"GAME · {env}", value=ver or "unknown",
+                      detail=f"build {build}" if build else "no build_manifest.id",
+                      state="ok" if ver else "idle"))
+
+    st, val, det = launcher_update_state()
+    tiles.append(dict(key="launcher", label="RSI LAUNCHER", value=val, detail=det, state=st))
+
+    try:
+        du = shutil.disk_usage(PREFIX)
+        free_gb = du.free / 1e9
+        tiles.append(dict(key="disk", label="DISK", value=f"{free_gb:,.0f} GB free".replace(",", " "),
+                          detail=f"{du.used / du.total:.0%} used · {mount_point(PREFIX)}", frac=du.used / du.total,
+                          state="warn" if free_gb < DISK_WARN_GB else "ok"))
+    except OSError:
+        tiles.append(dict(key="disk", label="DISK", value="unknown", detail=str(PREFIX),
+                          frac=0.0, state="idle"))
+
+    st, val, det = launcher_log_state(env)
+    tiles.append(dict(key="llog", label="LAUNCHER LOG", value=val, detail=det, state=st))
+
+    q = quantum_state()
+    if q is None:
+        tiles.append(dict(key="audio", label="AUDIO · PIPEWIRE", value="unknown",
+                          detail="pw-metadata not found", state="idle"))
+    elif q:
+        tiles.append(dict(key="audio", label="AUDIO · PIPEWIRE", value=f"quantum {q}",
+                          detail="forced · anti-stutter on", state="ok"))
+    else:
+        tiles.append(dict(key="audio", label="AUDIO · PIPEWIRE", value="default quantum",
+                          detail="🔊 2048 if audio crackles", state="idle"))
+    return tiles
+
+
+def act_launch(log):
+    """▶ Launch: check RSI for a newer launcher first. Newer launcher → patch mode
+    (the launcher updates itself on start, which has failed on the play runner)."""
+    inst = installed_launcher_version()
+    latest, err = latest_launcher_version(max_age=0)
+    if latest and inst and vtuple(latest) > vtuple(inst):
+        log(f"⚠️ RSI Launcher {latest} is out (installed: {inst}).")
+        if launch_sh_has_patch():
+            log("   Starting in patch mode — the launcher updates itself on the patch runner.")
+            act_start_launcher(log, True)
+            return
+        log("   sc-launch.sh has no patch mode — starting normally.")
+    elif latest:
+        log(f"✅ RSI Launcher {inst or '?'} is up to date")
+    else:
+        log(f"· launcher update check failed ({err}) — starting normally")
+    act_start_launcher(log)
+
+
+def act_status(log, env="LIVE"):
+    icon = {"ok": "✅", "warn": "⚠️ ", "error": "❌", "idle": "· "}
+    for t in status_snapshot(env):
+        log(f"{icon[t['state']]} {t['label']:<18} {t['value']:<22} {t['detail']}")
 
 
 # ---------------------------------------------------------------- action: backup
@@ -845,6 +1107,8 @@ def act_vram(log):
 # ---------------------------------------------------------------- CLI
 def cli():
     ap = argparse.ArgumentParser(description="Idus SC Toolbox (CLI mode)")
+    ap.add_argument("--status", action="store_true")
+    ap.add_argument("--launch", action="store_true")
     ap.add_argument("--kill", action="store_true")
     ap.add_argument("--restart", action="store_true")
     ap.add_argument("--restart-patch", action="store_true")
@@ -861,12 +1125,16 @@ def cli():
     ap.add_argument("--env", default="LIVE")
     ap.add_argument("--screen", type=int, default=None)
     a = ap.parse_args()
-    triggers = [a.kill, a.restart, a.restart_patch, a.backup, a.restore is not None, a.diag,
+    triggers = [a.status, a.launch, a.kill, a.restart, a.restart_patch, a.backup, a.restore is not None, a.diag,
                 a.fix_windows, a.kwin_rule, a.shaders, a.starstrings, a.vram, a.quantum]
     if not any(triggers):
         return False
+    if a.status:
+        act_status(print, a.env)
     if a.kill:
         act_kill(print)
+    if a.launch:
+        act_launch(print)
     if a.restart or a.restart_patch:
         act_start_launcher(print, patch=a.restart_patch)
     if a.backup:
@@ -913,7 +1181,7 @@ def gui():
     class Win(Gtk.ApplicationWindow):
         def __init__(self, app):
             super().__init__(application=app, title="Idus SC Toolbox")
-            self.set_default_size(sc(640), sc(800))
+            self.set_default_size(sc(1120), sc(760))
             try:
                 if ICON_FILE.exists():
                     self.set_icon_name("idus-sc-toolbox")
@@ -928,19 +1196,25 @@ def gui():
                 getattr(root, f"set_margin_{s}")(sc(16))
             self.set_child(root)
 
-            hb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(4))
+            # Header: icon beside title + version, centred as one unit (saves height in 2 columns)
+            hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(16))
             hb.set_halign(Gtk.Align.CENTER)
             if ICON_FILE.exists():
                 logo = Gtk.Image.new_from_file(str(ICON_FILE))
                 logo.set_pixel_size(sc(85))  # 25% larger than before (was 68)
                 hb.append(logo)
-            title = Gtk.Label(label="Idus SC Toolbox", xalign=0.5)
+            tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(2), valign=Gtk.Align.CENTER)
+            title = Gtk.Label(label="Idus SC Toolbox", xalign=0)
             title.add_css_class("app-title")
-            hb.append(title)
-            ver = Gtk.Label(label=f"V{APP_VERSION} · BUILD {BUILD}", xalign=0.5)
+            tb.append(title)
+            ver = Gtk.Label(label=f"V{APP_VERSION} · BUILD {BUILD}", xalign=0)
             ver.add_css_class("app-ver")
-            hb.append(ver)
-            root.append(hb)
+            tb.append(ver)
+            hb.append(tb)
+            header = Gtk.CenterBox()
+            header.set_center_widget(hb)
+            header.set_end_widget(self._launch_button())
+            root.append(header)
 
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(8))
             env_lbl = Gtk.Label(label="Environment:")
@@ -949,7 +1223,13 @@ def gui():
             self.env_box = Gtk.DropDown.new_from_strings(
                 [e for e in ENVIRONMENTS if ifind(GAME_ROOT, e)] or ["LIVE"])
             top.append(self.env_box)
+            self.env_box.connect("notify::selected", lambda *_: self._refresh_panel())
             top.append(Gtk.Box(hexpand=True))
+            refresh = Gtk.Button(label="⟳  Refresh")
+            refresh.add_css_class("btn-small")
+            refresh.set_tooltip_text("Re-read runners, wineserver, game build, disk, launcher log and audio")
+            refresh.connect("clicked", lambda _w: (self._refresh_status(), self._refresh_panel()))
+            top.append(refresh)
             self.status = Gtk.Label(label="")
             self.status.add_css_class("pill")
             self.status.set_valign(Gtk.Align.CENTER)
@@ -966,8 +1246,17 @@ def gui():
             scroller.set_overflow(Gtk.Overflow.HIDDEN)
             scroller.set_child(self.log_buf)
 
-            self._build_groups(root)
-            root.append(scroller)
+            self._status_panel(root)
+            cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=sc(14), homogeneous=True)
+            cols.set_vexpand(True)
+            left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(14))
+            right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(14))
+            cols.append(left)
+            cols.append(right)
+            root.append(cols)
+            self._build_groups(left, right)
+            scroller.set_min_content_height(sc(120))
+            right.append(scroller)  # the log fills the rest of the right column
 
             # Footer: author + RSI referral (clickable)
             foot = Gtk.Label()
@@ -985,6 +1274,7 @@ def gui():
             self._install_css()
             self._refresh_status()
             self._font_hint()
+            self._refresh_panel()
             if not GAME_ROOT.is_dir():
                 self.log(f"❌ cannot find {GAME_ROOT} — set SC_PREFIX if the prefix is elsewhere")
 
@@ -1040,6 +1330,7 @@ def gui():
                     for b in self._buttons:
                         b.set_sensitive(True)
                     self._refresh_status()
+                    self._refresh_panel()
                     return False
                 GLib.idle_add(done)
             threading.Thread(target=job, daemon=True).start()
@@ -1112,9 +1403,9 @@ def gui():
                     pass
             dlg.choose(self, None, cb)
 
-        def _build_groups(self, root):
+        def _build_groups(self, left, right):
             # 1 · Process
-            g = self._group(root, "1 · Close / clean")
+            g = self._group(left, "1 · Close / clean")
             self._btn(g, 0, 0, "💀  Kill SC + launcher + wineserver",
                       lambda: self._run(act_kill))
             self._btn(g, 0, 1, "🔄  Restart launcher",
@@ -1128,7 +1419,7 @@ def gui():
                       w=2)
 
             # 2 · Config in Kate
-            g = self._group(root, "2 · Open config in Kate")
+            g = self._group(left, "2 · Open config in Kate")
             self._btn(g, 0, 0, "USER.cfg",
                       lambda: self._open(ifind(env_dir(self.env()), "USER.cfg") or env_dir(self.env()) / "USER.cfg",
                                          "USER.cfg", create=True))
@@ -1143,11 +1434,15 @@ def gui():
                           ["konsole", "-e", "tail", "-n", "200", "-F",
                            str(ifind(env_dir(self.env()), "Game.log") or env_dir(self.env()) / "Game.log")],
                           start_new_session=True), self.log("✅ following Game.log in Konsole")))
-            self._btn(g, 2, 1, "📁  Game folder in Dolphin",
-                      lambda: subprocess.Popen(["dolphin", str(env_dir(self.env()))], start_new_session=True))
+            self._btn(g, 2, 1, "📄  Launcher log (follow live)",
+                      self._follow_launcher_log,
+                      "RSI Launcher log.log in Konsole — watch updates, Verify and patcher errors live")
+            self._btn(g, 3, 0, "📁  Game folder in Dolphin",
+                      lambda: subprocess.Popen(["dolphin", str(env_dir(self.env()))], start_new_session=True),
+                      w=2)
 
             # 3 · Backup / restore
-            g = self._group(root, f"3 · Backup  →  {BACKUP_DIR}")
+            g = self._group(left, f"3 · Backup  →  {BACKUP_DIR}")
             self._btn(g, 0, 0, "💾  Back up now (all environments)",
                       lambda: self._run(act_backup),
                       "user/ folders (keybinds, attributes), USER.cfg, sc-launch.sh. Shaders/logs excluded.")
@@ -1164,9 +1459,12 @@ def gui():
             self.autobackup_chk.set_active(bool(settings.get("autobackup")))
             self.autobackup_chk.connect("toggled", self._toggle_autobackup)
             g.attach(self.autobackup_chk, 1, 1, 1, 1)
+            self.backup_note = Gtk.Label(xalign=0)
+            self.backup_note.add_css_class("group-note")
+            g.attach(self.backup_note, 0, 2, 2, 1)
 
             # 4 · Joystick & windows
-            g = self._group(root, "4 · Joystick & windows")
+            g = self._group(right, "4 · Joystick & windows")
             self._btn(g, 0, 0, "🎮  Joystick diagnostics",
                       lambda: self._run(act_diag, self.env()),
                       "Lists VIRPIL devices, flags duplicates and shows what SC expects")
@@ -1183,25 +1481,34 @@ def gui():
                       lambda: self._run(act_open_kwin_settings))
 
             # 5 · Shaders / audio
-            g = self._group(root, "5 · Shaders & audio")
+            g = self._group(right, "5 · Shaders & audio")
             self.drv_chk = Gtk.CheckButton(label="incl. GPU driver cache")
             self._btn(g, 0, 0, "🧹  Clear shader cache", self._shaders_confirm)
             g.attach(self.drv_chk, 1, 0, 1, 1)
-            self._btn(g, 1, 0, "🔊  PipeWire quantum 2048",
+            self.q_btn = self._btn(g, 1, 0, "🔊  PipeWire quantum 2048",
                       lambda: self._run(act_quantum, True),
                       "clock.force-quantum 2048 against audio stutter — lasts until PipeWire restarts")
             self._btn(g, 1, 1, "↩️  Reset quantum",
                       lambda: self._run(act_quantum, False))
 
             # 6 · VRAM
-            g = self._group(root, "6 · VRAM")
-            self._btn(g, 0, 0, "📊  VRAM check",
+            g = self._group(right, "6 · VRAM")
+            meter = Gtk.Box(spacing=sc(10))
+            self.vram_bar = Gtk.ProgressBar(hexpand=True, valign=Gtk.Align.CENTER)
+            self.vram_bar.add_css_class("vram-inline")
+            self.vram_lbl = Gtk.Label(xalign=1)
+            self.vram_lbl.add_css_class("vram-inline-lbl")
+            meter.append(self.vram_bar)
+            meter.append(self.vram_lbl)
+            g.attach(meter, 0, 0, 2, 1)
+            self._btn(g, 1, 0, "📊  VRAM check (details)",
                       self._open_vram,
                       "NVIDIA only. Shows GPU memory use with a meter and flags heavy apps "
-                      "(e.g. OrcaSlicer) to close before launching SC")
+                      "(e.g. OrcaSlicer) to close before launching SC",
+                      w=2)
 
             # 7 · StarStrings (english global.ini)
-            g = self._group(root, "7 · StarStrings")
+            g = self._group(right, "7 · StarStrings")
             self._btn(g, 0, 0, "🌐  Update StarStrings (LIVE)",
                       lambda: self._confirm(
                           "Fetch the latest StarStrings (LIVE) and replace the english global.ini?\n\n"
@@ -1209,6 +1516,272 @@ def gui():
                           lambda: self._run(act_starstrings, self.env())),
                       "Downloads the latest LIVE release from GitHub, backs up the old global.ini, "
                       "places the new one in data/Localization/english")
+
+        def _launch_button(self):
+            """Big ▶ Launch, top right. Checks RSI for a launcher update before starting."""
+            self.launch_btn = Gtk.Button(valign=Gtk.Align.CENTER)
+            self.launch_btn.add_css_class("launch")
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(1))
+            big = Gtk.Label(label="▶  LAUNCH")
+            big.add_css_class("launch-big")
+            self.launch_sub = Gtk.Label(label="checks for updates first")
+            self.launch_sub.add_css_class("launch-sub")
+            box.append(big)
+            box.append(self.launch_sub)
+            self.launch_btn.set_child(box)
+            self.launch_btn.set_tooltip_text(
+                "Starts the RSI Launcher. Checks RSI for a newer launcher first — if one is out, "
+                "you can start in patch mode instead. Watches the launcher log while it runs.")
+            self.launch_btn.connect("clicked", lambda _w: self._launch_clicked())
+            self._buttons.append(self.launch_btn)
+            return self.launch_btn
+
+        def _launch_clicked(self):
+            if game_running():
+                self._confirm("Star Citizen is running.\n\nLaunch closes it first. Continue?",
+                              self._launch_check)
+            else:
+                self._launch_check()
+
+        def _launch_check(self):
+            self.launch_sub.set_label("checking RSI …")
+            for b in self._buttons:
+                b.set_sensitive(False)
+
+            def job():
+                inst = installed_launcher_version()
+                latest, err = latest_launcher_version(max_age=0)
+                GLib.idle_add(self._launch_decide, inst, latest, err)
+            threading.Thread(target=job, daemon=True).start()
+
+        def _launch_decide(self, inst, latest, err):
+            for b in self._buttons:
+                b.set_sensitive(True)
+            self.launch_sub.set_label("checks for updates first")
+            if latest and inst and vtuple(latest) > vtuple(inst):
+                patch_ok = launch_sh_has_patch()
+                dlg = Gtk.AlertDialog()
+                dlg.set_message(f"RSI Launcher {latest} is out — you have {inst}.")
+                dlg.set_detail(
+                    "The launcher updates itself when it starts. That has failed on the play runner "
+                    "before, so patch mode (the patch runner) is the safer choice. Afterwards, "
+                    "click ▶ Launch again to play." if patch_ok else
+                    "The launcher updates itself when it starts. sc-launch.sh has no patch mode, "
+                    "so it starts on the normal runner.")
+                dlg.set_buttons(["Cancel", "Launch anyway", "🩹  Patch mode"] if patch_ok
+                                else ["Cancel", "Launch"])
+                dlg.set_default_button(2 if patch_ok else 1)
+                dlg.set_cancel_button(0)
+
+                def cb(d, res):
+                    try:
+                        choice = d.choose_finish(res)
+                    except Exception:
+                        return
+                    if choice == 1:
+                        self._launch(False)
+                    elif choice == 2:
+                        self._launch(True)
+                dlg.choose(self, None, cb)
+            else:
+                if latest:
+                    self.log(f"✅ RSI Launcher {inst or '?'} is up to date")
+                else:
+                    self.log(f"· launcher update check failed ({err}) — starting normally")
+                self._launch(False)
+            return False
+
+        def _launch(self, patch):
+            def go(lg):
+                act_start_launcher(lg, patch)
+                if not patch:
+                    self._watch_launcher()
+            self._run(go)
+
+        def _watch_launcher(self):
+            """Follow the launcher log while it runs; offer patch mode if it starts patching
+            the game on the play runner, or loops on verify."""
+            if getattr(self, "_watching", False):
+                return
+            self._watching = True
+
+            def job():
+                path = launcher_log_file()
+                pos = path.stat().st_size if path else 0
+                asked_patch = asked_loop = told_update = False
+                t0 = time.time()
+                while True:
+                    time.sleep(3)
+                    path = path or launcher_log_file()
+                    if path and path.exists():
+                        size = path.stat().st_size
+                        if size < pos:  # log rotated
+                            pos = 0
+                        if size > pos:
+                            with open(path, "rb") as fh:
+                                fh.seek(pos)
+                                chunk = fh.read().decode(errors="ignore")
+                            pos = size
+                            if not asked_loop and "did not converge" in chunk:
+                                asked_loop = True
+                                GLib.idle_add(self._watch_alert, "loop")
+                            elif not asked_patch and ("[CigDataPatcher]" in chunk or "installer@" in chunk):
+                                asked_patch = True
+                                GLib.idle_add(self._watch_alert, "patch")
+                            if not told_update and ("Found version" in chunk or "Downloading update" in chunk):
+                                told_update = True
+                                self.log("⚠️ the launcher is downloading a launcher update (play runner)")
+                    if time.time() - t0 > 30 and subprocess.run(
+                            ["pgrep", "-f", "RSI Launcher"], capture_output=True).returncode != 0:
+                        break
+                self._watching = False
+            threading.Thread(target=job, daemon=True).start()
+
+        def _watch_alert(self, kind):
+            if kind == "loop":
+                self.log("❌ launcher: verify loop (“did not converge”) on the play runner")
+                msg = "Verify loop — the launcher can't finish checking Data.p4k."
+                det = ("This is what happened on the play runner before. Switch to patch mode? "
+                       "The launcher restarts on the patch runner and finishes there.")
+            else:
+                self.log("⚠️ launcher: started patching the game on the play runner")
+                msg = "The launcher started patching the game on the PLAY runner."
+                det = ("Patching has failed on the play runner before. Switch to patch mode now, "
+                       "or keep going — the Toolbox warns you if it starts to loop.")
+            if not launch_sh_has_patch():
+                return False
+            dlg = Gtk.AlertDialog()
+            dlg.set_message(msg)
+            dlg.set_detail(det)
+            dlg.set_buttons(["Keep going", "🩹  Switch to patch mode"])
+            dlg.set_default_button(1)
+            dlg.set_cancel_button(0)
+
+            def cb(d, res):
+                try:
+                    if d.choose_finish(res) == 1:
+                        self._run(act_start_launcher, True)
+                except Exception:
+                    pass
+            dlg.choose(self, None, cb)
+            return False
+
+        def _follow_launcher_log(self):
+            f = launcher_log_file()
+            if not f:
+                self.log("❌ no RSI Launcher log yet — start the launcher once")
+                return
+            subprocess.Popen(["konsole", "-e", "tail", "-n", "200", "-F", str(f)], start_new_session=True)
+            self.log("✅ following the launcher log in Konsole")
+
+        def _status_panel(self, root):
+            """Read-only status tiles at the top (4 per row)."""
+            frame = Gtk.Frame()
+            frame.add_css_class("group")
+            frame.add_css_class("status-panel")
+            head = Gtk.Box(spacing=sc(8))
+            head.add_css_class("group-head")
+            dot = Gtk.Label(label="●")
+            dot.add_css_class("head-dot")
+            head.append(dot)
+            title = Gtk.Label(label="Status", xalign=0)
+            title.add_css_class("group-title")
+            head.append(title)
+            frame.set_label_widget(head)
+            grid = Gtk.Grid(column_spacing=sc(8), row_spacing=sc(8), column_homogeneous=True)
+            for s in ("top", "bottom", "start", "end"):
+                getattr(grid, f"set_margin_{s}")(sc(10))
+            frame.set_child(grid)
+            self.tiles = {}
+            keys = ["play", "patch", "wine", "game", "launcher", "llog", "disk", "audio"]
+            for i, key in enumerate(keys):
+                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(3))
+                box.add_css_class("tile")
+                lab = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+                lab.add_css_class("tile-label")
+                val = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
+                val.add_css_class("tile-value")
+                box.append(lab)
+                box.append(val)
+                bar = None
+                if key == "disk":
+                    bar = Gtk.ProgressBar()
+                    bar.add_css_class("tile-bar")
+                    box.append(bar)
+                row = Gtk.Box(spacing=sc(6))
+                d = Gtk.Label(label="●")
+                d.add_css_class("dot")
+                det = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END)
+                det.add_css_class("tile-detail")
+                row.append(d)
+                row.append(det)
+                box.append(row)
+                grid.attach(box, i % 4, i // 4, 1, 1)
+                self.tiles[key] = (box, lab, val, d, det, bar)
+            root.append(frame)
+
+        def _refresh_panel(self):
+            env = self.env()
+
+            def job():
+                try:
+                    tiles = status_snapshot(env)
+                except Exception as e:  # noqa
+                    tiles = [dict(key="play", label="STATUS", value="error", detail=str(e), state="error")]
+                q = vram_query()
+                backups = list_backups()
+                GLib.idle_add(self._apply_panel, tiles, q, backups)
+            threading.Thread(target=job, daemon=True).start()
+
+        def _apply_panel(self, tiles, q, backups):
+            for t in tiles:
+                if t["key"] not in self.tiles:
+                    continue
+                box, lab, val, d, det, bar = self.tiles[t["key"]]
+                lab.set_label(t["label"])
+                val.set_label(t["value"])
+                det.set_label(t["detail"])
+                box.set_tooltip_text(f"{t['value']}\n{t['detail']}")
+                for s in ("ok", "warn", "error", "idle"):
+                    d.remove_css_class(f"dot-{s}")
+                d.add_css_class(f"dot-{t['state']}")
+                if bar is not None:
+                    bar.set_fraction(t.get("frac", 0.0))
+                    bar.remove_css_class("level-warn")
+                    if t["state"] == "warn":
+                        bar.add_css_class("level-warn")
+            # launch button hint follows the launcher tile
+            lt = next((t for t in tiles if t["key"] == "launcher"), None)
+            if lt and lt["state"] == "warn":
+                self.launch_sub.set_label("launcher update out → 🩹 offered")
+            else:
+                self.launch_sub.set_label("checks for updates first")
+            # quantum button shows when 2048 is active
+            audio = next((t for t in tiles if t["key"] == "audio"), None)
+            if audio and audio["state"] == "ok":
+                self.q_btn.add_css_class("active")
+            else:
+                self.q_btn.remove_css_class("active")
+            # inline VRAM meter
+            for s in ("ok", "warn", "crit"):
+                self.vram_bar.remove_css_class(f"vram-{s}")
+            if q:
+                used, total, _name = q
+                free = total - used
+                level = "ok" if game_running() or free >= 7000 else ("warn" if free >= 4500 else "crit")
+                self.vram_bar.set_fraction(used / total if total else 0)
+                self.vram_bar.add_css_class(f"vram-{level}")
+                self.vram_lbl.set_label(f"{used / 1024:.1f} / {total / 1024:.1f} GiB")
+            else:
+                self.vram_bar.set_fraction(0)
+                self.vram_lbl.set_label("NVIDIA only")
+            # backup note
+            if backups:
+                ts = dt.datetime.fromtimestamp(backups[0].stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+                self.backup_note.set_label(f"Last backup {ts} · {len(backups)} kept (max {KEEP_BACKUPS})")
+            else:
+                self.backup_note.set_label("No backups yet")
+            return False
 
         def _open_vram(self):
             win = Gtk.Window(title="VRAM Check")
@@ -1401,6 +1974,38 @@ def gui():
             .foot {{ font-size: {int(11*S)}px; color: {C['muted']}; margin-top: {sc(4)}px; }}
             .foot link, .foot link:visited, .foot link:hover {{ color: {C['accent']}; }}
             .foot link:focus-visible {{ outline: 1px solid {C['accent']}; outline-offset: 1px; }}
+            button.launch {{ background-color: {C['accent']}; color: {C['bg']}; border: 1px solid {C['accent']};
+                             border-radius: {sc(12)}px; padding: {sc(10)}px {sc(26)}px; }}
+            button.launch:hover {{ background-color: #ffad5c; }}
+            button.launch:disabled {{ background-color: {C['btn']}; border-color: {C['line']}; color: {C['dim']}; }}
+            .launch-big {{ font-family: {DISPLAY}; font-weight: 700; font-size: {int(20*S)}px; letter-spacing: 1px; }}
+            .launch-sub {{ font-family: {MONO}; font-size: {int(10*S)}px; }}
+            window.dialog, window.messagedialog, messagedialog {{ background-color: {C['surface']}; color: {C['fg']}; }}
+            messagedialog .titlebar, window.messagedialog .titlebar {{ background-color: {C['surface']}; }}
+            button.suggested-action, button.default {{ background-color: {C['accent']}; color: {C['bg']};
+                                                     border-color: {C['accent']}; }}
+            .status-panel .head-dot {{ color: {C['accent']}; font-size: {int(11*S)}px; }}
+            .tile {{ background-color: {C['deep']}; border: 1px solid {C['line']}; border-radius: {sc(10)}px;
+                     padding: {sc(8)}px {sc(10)}px; }}
+            .tile-label {{ font-family: {MONO}; font-size: {int(10*S)}px; font-weight: 500;
+                           letter-spacing: 1px; color: {C['muted']}; }}
+            .tile-value {{ font-size: {int(14*S)}px; font-weight: 600; color: {C['fg']}; }}
+            .tile-detail {{ font-size: {int(11*S)}px; color: {C['soft']}; }}
+            .dot {{ font-size: {int(10*S)}px; }}
+            .dot-ok {{ color: {C['ok']}; }}
+            .dot-warn {{ color: {C['warn']}; }}
+            .dot-error {{ color: {C['error']}; }}
+            .dot-idle {{ color: {C['dim']}; }}
+            progressbar.tile-bar trough {{ min-height: {sc(6)}px; border-radius: {sc(3)}px; background-color: {C['line']}; }}
+            progressbar.tile-bar progress {{ min-height: {sc(6)}px; border-radius: {sc(3)}px; background-color: {C['soft']}; }}
+            progressbar.tile-bar.level-warn progress {{ background-color: {C['warn']}; }}
+            .group-note {{ font-size: {int(11.5*S)}px; color: {C['muted']}; }}
+            button.btn-small {{ padding: {sc(4)}px {sc(10)}px; font-size: {int(12*S)}px; }}
+            button.active {{ border-color: {C['accent']}; color: {C['title']}; }}
+            progressbar.vram-inline trough {{ min-height: {sc(10)}px; border-radius: {sc(5)}px;
+                                              background-color: {C['deep']}; border: 1px solid {C['line']}; }}
+            progressbar.vram-inline progress {{ min-height: {sc(10)}px; border-radius: {sc(5)}px; }}
+            .vram-inline-lbl {{ font-family: {MONO}; font-size: {int(12*S)}px; color: {C['soft']}; }}
             .vram-gpu {{ font-size: {int(15*S)}px; font-weight: 700; color: {C['fg']}; }}
             .vram-verdict {{ font-size: {int(14*S)}px; font-weight: 700; }}
             progressbar text {{ color: {C['fg']}; font-size: {int(12*S)}px; }}

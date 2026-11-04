@@ -3,6 +3,29 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3] - 2026-11-04
+
+### Added
+- ▶ **Launch** button (top right). Checks RSI's public `latest.yml` for a newer RSI Launcher
+  before starting. If one is out, it offers **🩹 Patch mode** (default), **Launch anyway** or
+  **Cancel**, because the launcher updates itself on start. Offline, it starts normally.
+- Launcher watch: while the launcher runs on the play runner, the Toolbox follows its log and
+  offers patch mode if the launcher starts patching the game or loops with `did not converge`.
+- **Status** panel with 8 tiles: play runner (+ locale / åäö input), patch runner, running
+  wineserver, game version and build, RSI Launcher version vs. latest, last patch error in the
+  launcher log, free disk space (with bar) and PipeWire quantum.
+- 📄 **Launcher log (follow live)** in group 2.
+- Live VRAM bar in group 6, "last backup" line in group 3, orange frame on the quantum button
+  while 2048 is forced.
+- CLI: `--launch` (newer launcher → patch mode, no prompt) and `--status`.
+- Start-menu right-click actions: **▶ Launch** and **🩹 Patch / verify launcher**.
+
+### Changed
+- Two-column layout (groups 1–3 left, 4–7 and the log right); icon beside the title.
+  The window is about 1290 × 1290 px instead of ~740 × 1600.
+- Includes the 1.2.1 look (Saira title, orange group rings, status pill, fonts via the
+  installer), which was not released on its own.
+
 ## [1.2.1] - 2026-11-04
 
 ### Changed

@@ -58,6 +58,42 @@ bash install-idus-sc-toolbox.sh
 
 ## What the buttons do
 
+The window has two columns: groups 1–3 on the left, 4–7 and the log on the right. Above them sit
+the **▶ Launch** button and the **Status** panel.
+
+### ▶ Launch (top right)
+
+The everyday way to start the game. It asks RSI which RSI Launcher version is current (the
+public `latest.yml` that [LUG Helper](https://github.com/starcitizen-lug/lug-helper) also
+installs from) and compares it with the version in your Wine prefix.
+
+- Up to date → starts the launcher on your play runner, like **Restart launcher**.
+- Newer launcher out → asks first: **🩹 Patch mode** (default), **Launch anyway** or **Cancel**.
+  The launcher updates itself on start, and that is safer on the patch runner.
+- Offline → starts normally and says so in the log.
+- While the launcher runs, the Toolbox follows its log. If the launcher starts patching the
+  game on the play runner, or loops with `did not converge`, it offers to switch to patch mode.
+
+CIG has no public source for the next *game* version, so game patches are caught when the
+launcher starts them, not before.
+
+### Status panel
+
+| Tile | Shows |
+|---|---|
+| Play runner | Runner from `sc-launch.sh`, plus locale / XIM input (the åäö fix) |
+| Patch runner | Runner used by Patch / verify, or "not set up" |
+| Wineserver now | Which runner's wineserver is running. Two servers or an unknown Wine → warning |
+| Game | Version and build from `build_manifest.id` for the selected environment |
+| RSI Launcher | Installed version vs. RSI's latest |
+| Launcher log | Last patch error in the RSI Launcher log, and whether the game was updated after it |
+| Disk | Free space on the prefix disk, with a bar. Yellow under 50 GB |
+| Audio · PipeWire | Whether `clock.force-quantum` is forced (the 2048 button then gets an orange frame) |
+
+The panel refreshes after every action and with **⟳ Refresh**.
+
+### Buttons
+
 | Group | Button | Action |
 |---|---|---|
 | Close / clean | Kill SC + launcher + wineserver | `pkill` the game/launcher, then `wineserver -k` with every runner `sc-launch.sh` points at |
@@ -65,8 +101,9 @@ bash install-idus-sc-toolbox.sh
 | | Patch / verify launcher | Kill everything, then run `sc-launch.sh patch` — the RSI Launcher on a separate PATCH runner, for game updates and Verify. Needs [patch mode](#patch-mode-two-runners) in `sc-launch.sh`; refuses to start otherwise |
 | Config in Kate | USER.cfg / attributes.xml / actionmaps.xml / sc-launch.sh | Opens the file in Kate |
 | | Game.log (follow live) | `tail -F` in Konsole |
+| | Launcher log (follow live) | The RSI Launcher `log.log` in Konsole — updates, Verify and patcher errors |
 | | Game folder in Dolphin | Opens the env folder |
-| Backup | Back up now | Tars `user/` (keybinds, attributes), USER.cfg, sc-launch.sh → `~/SC-backups` |
+| Backup | Back up now | Tars `user/` (keybinds, attributes), USER.cfg, sc-launch.sh → `~/SC-backups`. The group shows when the last backup was taken |
 | | Restore latest backup | Safety-copies current state, then unpacks the latest backup |
 | | Auto-backup on launch | Takes one backup per day when the app starts |
 | Joystick & windows | Joystick diagnostics | Lists devices, flags duplicate instances, shows what SC expects |
@@ -75,7 +112,7 @@ bash install-idus-sc-toolbox.sh
 | | Open Window Rules | Opens the KDE Window Rules settings |
 | Shaders & audio | Clear shader cache | Deletes SC shader cache (optionally the GPU driver cache too) |
 | | PipeWire quantum 2048 / Reset | Audio-stutter workaround |
-| VRAM | VRAM check | Visual meter of GPU memory with a per-process bar chart; flags heavy apps (e.g. OrcaSlicer) to close before launching SC. **NVIDIA only** |
+| VRAM | Meter + VRAM check | Live bar in the group (used / total). The button opens the visual meter of GPU memory with a per-process bar chart; flags heavy apps (e.g. OrcaSlicer) to close before launching SC. **NVIDIA only** |
 | StarStrings | Update StarStrings (LIVE) | Downloads the latest [StarStrings](https://github.com/MrKraken/StarStrings) LIVE release, backs up the old english `global.ini` → `global.ini.BAK-[date]`, installs the new one |
 
 ### CLI
@@ -83,10 +120,14 @@ bash install-idus-sc-toolbox.sh
 Every action has a flag, for KDE global shortcuts or a Stream Deck:
 
 ```bash
-idus-sc-toolbox --kill | --restart | --restart-patch | --fix-windows | --backup \
-                --restore | --diag | --starstrings | --vram | --kwin-rule \
+idus-sc-toolbox --launch | --status | --kill | --restart | --restart-patch | --fix-windows \
+                --backup | --restore | --diag | --starstrings | --vram | --kwin-rule \
                 --shaders [--driver-cache] | --quantum on|off | --env PTU | --screen N
 ```
+
+`--launch` does the same check as the ▶ button, without asking: a newer launcher starts in
+patch mode. Right-clicking the Toolbox in the start menu offers **▶ Launch** and
+**🩹 Patch / verify launcher** too, so you can use it as your Star Citizen shortcut.
 
 ## Patch mode (two runners)
 

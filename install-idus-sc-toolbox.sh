@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idus SC Toolbox installer  ·  v1.2.1  ·  build 2026-11-04
+# Idus SC Toolbox installer  ·  v1.3  ·  build 2026-11-04
 # Installs Idus SC Toolbox (GTK4) as a self-contained folder in ~/.local/share/idus-sc-toolbox
 # + a start-menu entry with icon and right-click actions.
 # The Wine prefix is auto-detected from the LUG config → works on any machine.
@@ -88,7 +88,15 @@ Comment=Star Citizen tools: kill, backup/restore, joystick diag, windows, shader
 Exec=$BIN/idus-sc-toolbox
 $ICON_LINE
 Categories=Game;Utility;
-Actions=kill;fixwin;backup;starstrings;
+Actions=launch;patch;kill;fixwin;backup;starstrings;
+
+[Desktop Action launch]
+Name=▶ Launch (checks for updates)
+Exec=$BIN/idus-sc-toolbox --launch
+
+[Desktop Action patch]
+Name=🩹 Patch / verify launcher
+Exec=$BIN/idus-sc-toolbox --restart-patch
 
 [Desktop Action kill]
 Name=Kill SC + wineserver
