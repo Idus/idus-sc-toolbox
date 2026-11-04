@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.1  ·  build 2026-10-09
+#  Idus SC Toolbox  ·  v1.2  ·  build 2026-11-04
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -10,6 +10,8 @@ captures everything.
 
 GUI launches with no arguments. Same actions via CLI (KDE shortcuts / Stream Deck):
   idus-sc-toolbox --kill            Close SC + launcher + wineserver
+  idus-sc-toolbox --restart         Kill everything, then run sc-launch.sh (play)
+  idus-sc-toolbox --restart-patch   Kill everything, then run "sc-launch.sh patch" (PATCH runner)
   idus-sc-toolbox --backup          Back up config/keybinds (all environments)
   idus-sc-toolbox --restore [FILE]  Restore from backup (no FILE: latest). Safety copy first.
   idus-sc-toolbox --diag            Joystick diagnostics (OS devices, duplicates, what SC expects)
@@ -44,8 +46,8 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.1"
-BUILD = "2026-10-09"  # keep in sync with the header comment at the top of this file
+APP_VERSION = "1.2"
+BUILD = "2026-11-04"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
 KEEP_BACKUPS = 15
@@ -124,21 +126,49 @@ def dir_size(p: Path) -> int:
     return total
 
 
-def launch_sh_vars() -> dict:
-    out = {}
+def launch_sh_assignments():
+    """Every VAR="value" line in sc-launch.sh, in file order (also inside if/case blocks)."""
+    out = []
     if LAUNCH_SH.is_file():
         for line in LAUNCH_SH.read_text(errors="ignore").splitlines():
             m = re.match(r'\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)="?([^"#]*)"?', line)
             if m:
-                out[m.group(1)] = os.path.expandvars(m.group(2).strip()).replace("~", str(Path.home()), 1)
+                out.append((m.group(1),
+                            os.path.expandvars(m.group(2).strip()).replace("~", str(Path.home()), 1)))
+    return out
+
+
+def launch_sh_vars() -> dict:
+    return dict(launch_sh_assignments())  # last assignment wins (unchanged since v1.0)
+
+
+def runner_bins() -> list:
+    """Every Wine runner bin dir sc-launch.sh points at, in file order (play runner first,
+    then e.g. the patch runner). Values like "$patch_wine_path" don't exist on disk and are
+    skipped. A wineserver can only stop a server of its own Wine version, so act_kill
+    has to run -k with each of these."""
+    out = []
+    for key, val in launch_sh_assignments():
+        if key.endswith("wine_path") and (Path(val) / "wineserver").exists() and val not in out:
+            out.append(val)
     return out
 
 
 def wineserver_bin() -> str:
-    wp = launch_sh_vars().get("wine_path")
-    if wp and (Path(wp) / "wineserver").exists():
-        return str(Path(wp) / "wineserver")
+    bins = runner_bins()
+    if bins:
+        return str(Path(bins[0]) / "wineserver")
     return shutil.which("wineserver") or "wineserver"
+
+
+def launch_sh_has_patch() -> bool:
+    """True if sc-launch.sh understands "sc-launch.sh patch" (see README → Patch mode)."""
+    try:
+        txt = LAUNCH_SH.read_text(errors="ignore")
+    except OSError:
+        return False
+    return bool(re.search(r'\$\{?1\}?"?\s*==?\s*"?patch\b', txt)
+                or re.search(r'^\s*"?patch"?\s*\)', txt, re.M))
 
 
 def game_running() -> bool:
@@ -150,13 +180,49 @@ def act_kill(log):
     for pat in PROCESS_PATTERNS:
         r = subprocess.run(["pkill", "-9", "-f", pat], capture_output=True)
         log(("✅ killed " if r.returncode == 0 else "· nothing matched ") + pat)
-    ws = wineserver_bin()
     env = dict(os.environ, WINEPREFIX=str(PREFIX))
-    r = subprocess.run([ws, "-k"], env=env, capture_output=True, text=True)
-    log(f"✅ wineserver -k ({ws})" if r.returncode == 0 else f"⏳ wineserver -k: {r.stderr.strip() or 'nothing to kill'}")
+    servers = [str(Path(b) / "wineserver") for b in runner_bins()] or [wineserver_bin()]
+    for ws in servers:
+        name = Path(ws).parent.parent.name if len(servers) > 1 else ws
+        try:
+            r = subprocess.run([ws, "-k"], env=env, capture_output=True, text=True)
+        except OSError as e:
+            log(f"⏳ wineserver -k ({name}): {e}")
+            continue
+        log(f"✅ wineserver -k ({name})" if r.returncode == 0
+            else f"· wineserver -k ({name}): {r.stderr.strip() or 'nothing to kill'}")
     time.sleep(1)
     left = subprocess.run(["pgrep", "-af", "\\.exe"], capture_output=True, text=True).stdout.strip()
     log("✅ no .exe processes left" if not left else f"❌ still running:\n{left}")
+
+
+def act_start_launcher(log, patch=False):
+    """Kill everything, then run sc-launch.sh — or "sc-launch.sh patch" (RSI Launcher on the
+    PATCH runner, for game updates / Verify). Patch mode is refused if sc-launch.sh lacks it,
+    so it never silently starts the normal runner instead."""
+    if not LAUNCH_SH.is_file():
+        log(f"❌ cannot find {LAUNCH_SH} — set SC_PREFIX if the prefix is elsewhere")
+        return
+    if patch:
+        if not launch_sh_has_patch():
+            log("❌ sc-launch.sh has no patch mode — nothing was started.")
+            log("   Add it first: README → 'Patch mode (two runners)'.")
+            return
+        pw = launch_sh_vars().get("patch_wine_path")
+        if pw and "$" not in pw and not (Path(pw) / "wine").exists():
+            log(f"❌ PATCH runner not found: {pw} — nothing was started.")
+            return
+    act_kill(log)
+    cmd = ["bash", str(LAUNCH_SH)] + (["patch"] if patch else [])
+    subprocess.Popen(cmd, start_new_session=True)
+    if patch:
+        pw = launch_sh_vars().get("patch_wine_path")
+        runner = Path(pw).parent.name if pw and "$" not in pw else "patch runner"
+        log(f"✅ started sc-launch.sh patch → {runner}")
+        log("   Update / Verify in the launcher, then 'Restart launcher' to play.")
+    else:
+        bins = runner_bins()
+        log("✅ started sc-launch.sh" + (f" → {Path(bins[0]).parent.name}" if bins else ""))
 
 
 # ---------------------------------------------------------------- action: backup
@@ -496,6 +562,17 @@ def act_open_kwin_settings(log):
 SHADER_SUBDIRS = ("shaders", "vulkanshadercache")  # the big Vulkan cache lives in the latter
 
 
+def _deletable_cache(p: Path) -> bool:
+    """Guard for the driver-cache paths read from sc-launch.sh: never the Wine prefix
+    itself, a folder above it, $HOME or a folder above it."""
+    try:
+        r = p.resolve()
+        home, pre = Path.home().resolve(), PREFIX.resolve()
+    except OSError:
+        return False
+    return r not in {home, pre, *home.parents, *pre.parents}
+
+
 def shader_targets(env: str, include_driver: bool):
     targets = []
     # The real SC cache lives under AppData/Local/Star Citizen/<build>/{shaders,vulkanshadercache}
@@ -525,7 +602,7 @@ def shader_targets(env: str, include_driver: bool):
     if include_driver:
         v = launch_sh_vars()
         for key in ["__GL_SHADER_DISK_CACHE_PATH", "MESA_SHADER_CACHE_DIR", "DXVK_STATE_CACHE_PATH"]:
-            if v.get(key) and Path(v[key]).is_dir():
+            if v.get(key) and Path(v[key]).is_dir() and _deletable_cache(Path(v[key])):
                 targets.append(Path(v[key]))
         nv = Path.home() / ".cache/nvidia/GLCache"
         if nv.is_dir():
@@ -769,6 +846,8 @@ def act_vram(log):
 def cli():
     ap = argparse.ArgumentParser(description="Idus SC Toolbox (CLI mode)")
     ap.add_argument("--kill", action="store_true")
+    ap.add_argument("--restart", action="store_true")
+    ap.add_argument("--restart-patch", action="store_true")
     ap.add_argument("--backup", action="store_true")
     ap.add_argument("--restore", nargs="?", const="__latest__", metavar="FILE")
     ap.add_argument("--diag", action="store_true")
@@ -782,12 +861,14 @@ def cli():
     ap.add_argument("--env", default="LIVE")
     ap.add_argument("--screen", type=int, default=None)
     a = ap.parse_args()
-    triggers = [a.kill, a.backup, a.restore is not None, a.diag, a.fix_windows,
-                a.kwin_rule, a.shaders, a.starstrings, a.vram, a.quantum]
+    triggers = [a.kill, a.restart, a.restart_patch, a.backup, a.restore is not None, a.diag,
+                a.fix_windows, a.kwin_rule, a.shaders, a.starstrings, a.vram, a.quantum]
     if not any(triggers):
         return False
     if a.kill:
         act_kill(print)
+    if a.restart or a.restart_patch:
+        act_start_launcher(print, patch=a.restart_patch)
     if a.backup:
         act_backup(print)
     if a.restore is not None:
@@ -941,13 +1022,13 @@ def gui():
                 GLib.idle_add(done)
             threading.Thread(target=job, daemon=True).start()
 
-        def _btn(self, grid, r, c, text, cb, tip=""):
+        def _btn(self, grid, r, c, text, cb, tip="", w=1):
             b = Gtk.Button(label=text)
             b.set_hexpand(True)
             if tip:
                 b.set_tooltip_text(tip)
             b.connect("clicked", lambda _w: cb())
-            grid.attach(b, c, r, 1, 1)
+            grid.attach(b, c, r, w, 1)
             self._buttons.append(b)
             return b
 
@@ -993,11 +1074,14 @@ def gui():
             self._btn(g, 0, 0, "💀  Kill SC + launcher + wineserver",
                       lambda: self._run(act_kill))
             self._btn(g, 0, 1, "🔄  Restart launcher",
-                      lambda: self._run(lambda lg: (act_kill(lg),
-                                                    subprocess.Popen(["bash", str(LAUNCH_SH)],
-                                                                     start_new_session=True),
-                                                    lg("✅ started sc-launch.sh"))),
-                      "Kills everything and runs LUG's sc-launch.sh")
+                      lambda: self._run(act_start_launcher),
+                      "Kills everything and runs LUG's sc-launch.sh (normal / play runner)")
+            self._btn(g, 1, 0, "🩹  Patch / verify launcher",
+                      lambda: self._run(act_start_launcher, True),
+                      "Kills everything and runs 'sc-launch.sh patch': the RSI Launcher on your "
+                      "PATCH runner, for game updates and Verify. Then 'Restart launcher' to play. "
+                      "Needs patch mode in sc-launch.sh — see the README.",
+                      w=2)
 
             # 2 · Config in Kate
             g = self._group(root, "2 · Open config in Kate")

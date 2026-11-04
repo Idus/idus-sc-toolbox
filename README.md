@@ -57,8 +57,9 @@ bash install-idus-sc-toolbox.sh
 
 | Group | Button | Action |
 |---|---|---|
-| Close / clean | Kill SC + launcher + wineserver | `pkill` the game/launcher, then `wineserver -k` |
+| Close / clean | Kill SC + launcher + wineserver | `pkill` the game/launcher, then `wineserver -k` with every runner `sc-launch.sh` points at |
 | | Restart launcher | Kill everything, then run LUG's `sc-launch.sh` |
+| | Patch / verify launcher | Kill everything, then run `sc-launch.sh patch` — the RSI Launcher on a separate PATCH runner, for game updates and Verify. Needs [patch mode](#patch-mode-two-runners) in `sc-launch.sh`; refuses to start otherwise |
 | Config in Kate | USER.cfg / attributes.xml / actionmaps.xml / sc-launch.sh | Opens the file in Kate |
 | | Game.log (follow live) | `tail -F` in Konsole |
 | | Game folder in Dolphin | Opens the env folder |
@@ -79,10 +80,46 @@ bash install-idus-sc-toolbox.sh
 Every action has a flag, for KDE global shortcuts or a Stream Deck:
 
 ```bash
-idus-sc-toolbox --kill | --fix-windows | --backup | --restore | --diag \
-                --starstrings | --vram | --kwin-rule | --shaders [--driver-cache] \
-                --quantum on|off | --env PTU | --screen N
+idus-sc-toolbox --kill | --restart | --restart-patch | --fix-windows | --backup \
+                --restore | --diag | --starstrings | --vram | --kwin-rule \
+                --shaders [--driver-cache] | --quantum on|off | --env PTU | --screen N
 ```
+
+## Patch mode (two runners)
+
+Sometimes the Wine runner that plays best can't patch. Example from November 2026:
+`lug-wine-tkg-staging-experimental-wayland-git-11.17-1` fixed clicking at in-game terminals,
+but on it RSI Launcher 2.19.1 looped on Update/Verify with
+`p4k verification did not converge after 10 passes`. On `lug-wine-tkg-staging-git-11.16-1`
+the same update finished in about 30 seconds. Your runners may differ; the setup is the same.
+
+The fix is to play on one runner and patch on another, without editing `sc-launch.sh` every
+patch day. Add this to your `sc-launch.sh`, in the *Wine binary path* section, replacing the
+existing `export wine_path=...` line and using your own runner folders:
+
+```bash
+# PLAY runner (default)
+export wine_path="/path/to/runners/<play-runner>/bin"
+# PATCH runner - used by "./sc-launch.sh patch"
+patch_wine_path="/path/to/runners/<patch-runner>/bin"
+play_wine_path="$wine_path"
+
+if [ "$1" = "patch" ]; then
+    export wine_path="$patch_wine_path"
+fi
+```
+
+Then replace the `"$wine_path"/wineserver -k` line with these two lines. A wineserver can
+only stop a server started by its own Wine version.
+
+```bash
+"$play_wine_path"/wineserver -k
+"$patch_wine_path"/wineserver -k
+```
+
+On patch day, click **Patch / verify launcher**, let the launcher update or verify, then click
+**Restart launcher** to play. Without patch mode in `sc-launch.sh`, the button logs a message
+and starts nothing, so it never quietly patches on the wrong runner.
 
 ## Notes & caveats
 
