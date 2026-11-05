@@ -3,6 +3,17 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3.3] - 2026-11-05
+
+### Fixed
+- Status → **Wineserver now** showed "other Wine + other Wine" (warning) while Star Citizen ran
+  fine. Wine starts its server through a path like `…/lib/wine/x86_64-unix/../../../bin/wineserver`,
+  which didn't match the runner folder. Paths are now resolved first, and only servers for the
+  Star Citizen prefix count. Other Wine apps (another prefix) are shown as a note, not a warning.
+- Status → **Launcher log** kept warning about an old verify loop after it was fixed: the game
+  files' timestamp doesn't always change when a patch finishes. Now the warning clears as soon as
+  the game was patched *or played* (`Game.log`) after the error.
+
 ## [1.3.2] - 2026-11-05
 
 ### Fixed

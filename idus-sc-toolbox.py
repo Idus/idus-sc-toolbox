@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3.2  ·  build 2026-11-05
+#  Idus SC Toolbox  ·  v1.3.3  ·  build 2026-11-05
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -48,7 +48,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 BUILD = "2026-11-05"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
@@ -242,15 +242,40 @@ def runner_short(bin_dir) -> str:
     return f"{ver} {flavour}".strip()
 
 
+def _proc_prefix(pid: str) -> str:
+    """WINEPREFIX of a running process (resolved), '' if unknown."""
+    try:
+        env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+    except OSError:
+        return ""
+    for e in env:
+        if e.startswith(b"WINEPREFIX="):
+            return os.path.realpath(e[len(b"WINEPREFIX="):].decode(errors="ignore"))
+    return ""
+
+
 def running_wineservers() -> list:
-    """Bin dir of every running wineserver ('' when it was started without a path)."""
+    """Every running wineserver as {'bin': resolved bin dir, 'prefix': resolved WINEPREFIX}.
+    Wine starts the server through paths like …/lib/wine/x86_64-unix/../../../bin/wineserver,
+    so both sides are resolved before comparing."""
     r = subprocess.run(["pgrep", "-a", "wineserver"], capture_output=True, text=True)
     out = []
     for line in r.stdout.splitlines():
-        parts = line.split(maxsplit=1)
-        if len(parts) == 2:
-            exe = parts[1].split()[0]
-            out.append(str(Path(exe).parent) if "/" in exe else "")
+        pid, _, cmd = line.strip().partition(" ")
+        try:  # skip zombies (already exited, not yet reaped)
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                continue
+        except (OSError, IndexError):
+            continue
+        exe = cmd.split()[0] if cmd.split() else ""
+        if "/" in exe:
+            bin_dir = os.path.realpath(os.path.dirname(exe))
+        else:
+            try:
+                bin_dir = os.path.dirname(os.path.realpath(f"/proc/{pid}/exe"))
+            except OSError:
+                bin_dir = ""
+        out.append({"bin": bin_dir, "prefix": _proc_prefix(pid)})
     return out
 
 
@@ -348,9 +373,11 @@ def launcher_log_state(env="LIVE"):
         return "ok", "no patch errors", f"{len(ev)} recent log lines checked"
     when, _lvl, msg = errs[-1]
     kind = "verify loop" if "did not converge" in msg else "patch error"
-    mf = ifind(env_dir(env), "build_manifest.id")
-    if mf and dt.datetime.fromtimestamp(mf.stat().st_mtime) > when:
-        return "ok", "patched since", f"{kind} {when:%m-%d %H:%M} · game updated after"
+    # Resolved if the game was patched (build_manifest.id) or played (Game.log) after the error.
+    after = [dt.datetime.fromtimestamp(f.stat().st_mtime)
+             for f in (ifind(env_dir(env), "build_manifest.id"), ifind(env_dir(env), "Game.log")) if f]
+    if after and max(after) > when:
+        return "ok", "resolved since", f"{kind} {when:%m-%d %H:%M} · game patched or played after"
     return "warn", kind, f"{when:%m-%d %H:%M} · use 🩹 Patch / verify"
 
 
@@ -414,21 +441,31 @@ def status_snapshot(env="LIVE") -> list:
                           detail=pw if has_patch else "optional · README → Patch mode",
                           state="warn" if has_patch else "idle"))
 
-    running = running_wineservers()
-    if not running:
+    # Only servers for the SC prefix count; other Wine apps (another prefix) are left alone.
+    real_bins = {os.path.realpath(b): b for b in bins}
+    pre = os.path.realpath(PREFIX)
+    servers = running_wineservers()
+    ours = [s for s in servers if s["prefix"] == pre or (not s["prefix"] and s["bin"] in real_bins)]
+    others = len(servers) - len(ours)
+    other_txt = f" · {others} other Wine app{'s' if others != 1 else ''}" if others else ""
+    if not ours:
         tiles.append(dict(key="wine", label="WINESERVER NOW", value="not running",
-                          detail="starts with the launcher", state="idle"))
+                          detail="starts with the launcher" + other_txt, state="idle"))
     else:
         names = []
-        for r in running:
-            if r and r in bins:
-                names.append(f"{runner_short(r).split()[0]} · {'play' if r == play else 'patch'}")
-            else:
-                names.append("other Wine")
-        clean = len(running) == 1 and names[0] != "other Wine"
+        for s in ours:
+            b = real_bins.get(s["bin"])
+            names.append(f"{runner_short(b).split()[0]} · {'play' if b == play else 'patch'}"
+                         if b else "unknown Wine")
+        clean = len(ours) == 1 and names[0] != "unknown Wine"
+        if clean:
+            det = "1 server" + other_txt
+        elif len(ours) > 1:
+            det = f"{len(ours)} servers for SC · 💀 Kill stops all"
+        else:
+            det = "not a runner from sc-launch.sh"
         tiles.append(dict(key="wine", label="WINESERVER NOW", value=" + ".join(names),
-                          detail="1 server" if clean else f"{len(running)} servers · 💀 Kill stops all",
-                          state="ok" if clean else "warn"))
+                          detail=det, state="ok" if clean else "warn"))
 
     ver, build = game_build(env)
     tiles.append(dict(key="game", label=f"GAME · {env}", value=ver or "unknown",
