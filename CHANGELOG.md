@@ -3,6 +3,17 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3.2] - 2026-11-05
+
+### Fixed
+- The RSI Launcher could open outside the visible screens: you heard it, but no window showed,
+  whether it was started from the Toolbox or the desktop icon. "Fix windows now" brought it back.
+  The Toolbox now does that automatically when it starts the launcher (▶ Launch, Restart, Patch /
+  verify, `--launch`, start-menu actions): the launcher is centred on the main screen and brought
+  to the front, and for 3 minutes it is pulled back if it lands off-screen. Moving it yourself
+  to another screen is left alone. Starting from the plain desktop icon bypasses this — use
+  "Fix windows now" there, or start via the Toolbox.
+
 ## [1.3.1] - 2026-11-05
 
 ### Fixed

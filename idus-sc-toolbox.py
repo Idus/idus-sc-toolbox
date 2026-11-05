@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3.1  ·  build 2026-11-05
+#  Idus SC Toolbox  ·  v1.3.2  ·  build 2026-11-05
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -48,7 +48,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 BUILD = "2026-11-05"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
@@ -216,7 +216,7 @@ def act_start_launcher(log, patch=False):
             return
     act_kill(log)
     if kwin_raise_launcher(log):
-        log("· KWin brings the launcher window to the front when it opens")
+        log("· KWin centres the launcher on the main screen and brings it to the front")
     cmd = ["bash", str(LAUNCH_SH)] + (["patch"] if patch else [])
     subprocess.Popen(cmd, start_new_session=True)
     if patch:
@@ -725,10 +725,40 @@ def _dbus(*args):
 
 
 KWIN_RAISE_JS = r"""
-// Idus SC Toolbox: bring the RSI Launcher to the front when it opens.
-// A launcher started from inside the Toolbox gets no KDE start token, so KWin's
-// focus-stealing prevention would open it *behind* the active window.
+// Idus SC Toolbox: when the RSI Launcher opens, centre it on the main screen and bring it
+// to the front (the same as "Fix windows now").
+// - A launcher started from inside an app gets no KDE start token, so KWin's focus-stealing
+//   prevention would open it *behind* the active window.
+// - The launcher can also restore an old position outside the visible screens; while this
+//   script is loaded (3 min) it is pulled back to the main screen if it lands off-screen.
 const seen = {};
+function screenList() {
+    try { return workspace.screens || []; } catch (e) { return []; }
+}
+function mainGeo() {
+    const scr = screenList();
+    if (scr.length) {
+        const s = (__SCREEN__ >= 0 && __SCREEN__ < scr.length) ? scr[__SCREEN__] : scr[0];
+        return s.geometry;
+    }
+    return workspace.clientArea(KWin.MaximizeArea, 0, workspace.currentDesktop);
+}
+function onScreen(g) {
+    const cx = g.x + g.width / 2, cy = g.y + g.height / 2;
+    const scr = screenList();
+    if (!scr.length) return true;
+    for (const s of scr) {
+        const a = s.geometry;
+        if (cx >= a.x && cx < a.x + a.width && cy >= a.y && cy < a.y + a.height) return true;
+    }
+    return false;
+}
+function centre(w) {
+    const m = mainGeo(), g = w.frameGeometry;
+    w.frameGeometry = { x: Math.round(m.x + (m.width - g.width) / 2),
+                        y: Math.round(m.y + (m.height - g.height) / 2),
+                        width: g.width, height: g.height };
+}
 function isLauncher(w) {
     const cap = (w.caption || "").toLowerCase();
     const cls = (w.resourceClass || "").toLowerCase();
@@ -741,7 +771,11 @@ function bring(w) {
     if (seen[id]) return;
     seen[id] = true;
     w.minimized = false;
+    centre(w);
     if ("activeWindow" in workspace) { workspace.activeWindow = w; } else { workspace.activeClient = w; }
+    if (w.frameGeometryChanged) {
+        w.frameGeometryChanged.connect(function () { if (!onScreen(w.frameGeometry)) centre(w); });
+    }
 }
 const added = workspace.windowAdded || workspace.clientAdded;
 added.connect(function (w) {
@@ -758,14 +792,14 @@ def kwin_raise_launcher(log, seconds=180) -> bool:
     if not shutil.which("dbus-send"):
         return False
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
-        f.write(KWIN_RAISE_JS)
+        f.write(KWIN_RAISE_JS.replace("__SCREEN__", str(_main_screen_arg())))
         js = f.name
     _dbus("/Scripting", "org.kde.kwin.Scripting.unloadScript", f"string:{KWIN_RAISE_NAME}")
     r = _dbus("/Scripting", "org.kde.kwin.Scripting.loadScript", f"string:{js}", f"string:{KWIN_RAISE_NAME}")
     m = re.search(r"int32 (-?\d+)", r.stdout)
     if not m or m.group(1) == "-1":
         os.unlink(js)
-        log("· KWin not available — the launcher window may open behind other windows")
+        log("· KWin not available — if the launcher doesn't show, use 🎯 Fix windows now")
         return False
     _dbus(f"/Scripting/Script{m.group(1)}", "org.kde.kwin.Script.run")
     unload = ("dbus-send --session --dest=org.kde.KWin /Scripting "
