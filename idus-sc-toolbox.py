@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3  ·  build 2026-11-04
+#  Idus SC Toolbox  ·  v1.3.1  ·  build 2026-11-05
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -48,8 +48,8 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3"
-BUILD = "2026-11-04"  # keep in sync with the header comment at the top of this file
+APP_VERSION = "1.3.1"
+BUILD = "2026-11-05"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
 KEEP_BACKUPS = 15
@@ -215,6 +215,8 @@ def act_start_launcher(log, patch=False):
             log(f"❌ PATCH runner not found: {pw} — nothing was started.")
             return
     act_kill(log)
+    if kwin_raise_launcher(log):
+        log("· KWin brings the launcher window to the front when it opens")
     cmd = ["bash", str(LAUNCH_SH)] + (["patch"] if patch else [])
     subprocess.Popen(cmd, start_new_session=True)
     if patch:
@@ -720,6 +722,57 @@ for (const w of wins) {
 def _dbus(*args):
     return subprocess.run(["dbus-send", "--session", "--print-reply", "--dest=org.kde.KWin", *args],
                           capture_output=True, text=True)
+
+
+KWIN_RAISE_JS = r"""
+// Idus SC Toolbox: bring the RSI Launcher to the front when it opens.
+// A launcher started from inside the Toolbox gets no KDE start token, so KWin's
+// focus-stealing prevention would open it *behind* the active window.
+const seen = {};
+function isLauncher(w) {
+    const cap = (w.caption || "").toLowerCase();
+    const cls = (w.resourceClass || "").toLowerCase();
+    const nm = (w.resourceName || "").toLowerCase();
+    return cls.includes("rsi launcher") || nm.includes("rsi launcher") || cap.includes("rsi launcher");
+}
+function bring(w) {
+    if (!w || !w.normalWindow || !isLauncher(w)) return;
+    const id = String(w.internalId);
+    if (seen[id]) return;
+    seen[id] = true;
+    w.minimized = false;
+    if ("activeWindow" in workspace) { workspace.activeWindow = w; } else { workspace.activeClient = w; }
+}
+const added = workspace.windowAdded || workspace.clientAdded;
+added.connect(function (w) {
+    bring(w);
+    if (w.captionChanged) { w.captionChanged.connect(function () { bring(w); }); }
+});
+"""
+KWIN_RAISE_NAME = "idus-sc-toolbox-raise"
+
+
+def kwin_raise_launcher(log, seconds=180) -> bool:
+    """Load a short-lived KWin script that activates the RSI Launcher window when it appears,
+    and unload it again after `seconds` (detached, so it also works from the CLI)."""
+    if not shutil.which("dbus-send"):
+        return False
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+        f.write(KWIN_RAISE_JS)
+        js = f.name
+    _dbus("/Scripting", "org.kde.kwin.Scripting.unloadScript", f"string:{KWIN_RAISE_NAME}")
+    r = _dbus("/Scripting", "org.kde.kwin.Scripting.loadScript", f"string:{js}", f"string:{KWIN_RAISE_NAME}")
+    m = re.search(r"int32 (-?\d+)", r.stdout)
+    if not m or m.group(1) == "-1":
+        os.unlink(js)
+        log("· KWin not available — the launcher window may open behind other windows")
+        return False
+    _dbus(f"/Scripting/Script{m.group(1)}", "org.kde.kwin.Script.run")
+    unload = ("dbus-send --session --dest=org.kde.KWin /Scripting "
+              f"org.kde.kwin.Scripting.unloadScript string:{KWIN_RAISE_NAME} >/dev/null 2>&1")
+    subprocess.Popen(["sh", "-c", f"sleep {int(seconds)}; {unload}; rm -f '{js}'"],
+                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
 
 
 def act_fix_windows(log, screen=None):

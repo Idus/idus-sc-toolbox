@@ -3,6 +3,15 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3.1] - 2026-11-05
+
+### Fixed
+- The RSI Launcher window could open *behind* the Toolbox (or other windows) when started with
+  ▶ Launch, Restart launcher or Patch / verify. A launcher started from inside an app gets no
+  KDE start token, so KWin's focus-stealing prevention keeps it in the background. The Toolbox
+  now loads a short-lived KWin script that brings the launcher window to the front when it
+  opens (unloaded again after 3 minutes). Starting from the desktop icon was not affected.
+
 ## [1.3] - 2026-11-04
 
 ### Added
