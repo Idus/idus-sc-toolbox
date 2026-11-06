@@ -3,6 +3,12 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3.4] - 2026-11-06
+
+### Fixed
+- The version line under the title sat too close and covered the bottom of "Idus SC Toolbox".
+  It now sits a few pixels lower, so the whole title shows.
+
 ## [1.3.3] - 2026-11-05
 
 ### Fixed

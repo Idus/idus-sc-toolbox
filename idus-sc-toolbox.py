@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3.3  ·  build 2026-11-05
+#  Idus SC Toolbox  ·  v1.3.4  ·  build 2026-11-06
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -48,8 +48,8 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3.3"
-BUILD = "2026-11-05"  # keep in sync with the header comment at the top of this file
+APP_VERSION = "1.3.4"
+BUILD = "2026-11-06"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
 KEEP_BACKUPS = 15
@@ -1327,7 +1327,7 @@ def gui():
                 logo = Gtk.Image.new_from_file(str(ICON_FILE))
                 logo.set_pixel_size(sc(85))  # 25% larger than before (was 68)
                 hb.append(logo)
-            tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(2), valign=Gtk.Align.CENTER)
+            tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(8), valign=Gtk.Align.CENTER)
             title = Gtk.Label(label="Idus SC Toolbox", xalign=0)
             title.add_css_class("app-title")
             tb.append(title)
@@ -2060,7 +2060,7 @@ def gui():
             css = f"""
             window {{ background-color: {C['bg']}; color: {C['fg']}; font-family: {BODY}; font-size: {f}px; }}
             .app-title {{ font-family: {DISPLAY}; font-size: {int(30*S)}px; font-weight: 700;
-                          letter-spacing: 0.3px; color: {C['title']}; }}
+                          letter-spacing: 0.3px; color: {C['title']}; padding-bottom: {sc(2)}px; }}
             .app-ver {{ font-family: {MONO}; font-size: {int(11*S)}px; font-weight: 500;
                         letter-spacing: 1px; color: {C['muted']}; }}
             .env-lbl {{ color: {C['muted']}; }}
