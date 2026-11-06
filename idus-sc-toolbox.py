@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3.6  ·  build 2026-11-06
+#  Idus SC Toolbox  ·  v1.3.7  ·  build 2026-11-06
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -18,7 +18,8 @@ GUI launches with no arguments. Same actions via CLI (KDE shortcuts / Stream Dec
   idus-sc-toolbox --restore [FILE]  Restore from backup (no FILE: latest). Safety copy first.
   idus-sc-toolbox --diag            Joystick diagnostics (OS devices, duplicates, what SC expects)
   idus-sc-toolbox --fix-windows     Move launcher to centre + SC to main screen (one-shot, KWin)
-  idus-sc-toolbox --kwin-rule       Install permanent KWin rule: pin windows to the main screen
+  idus-sc-toolbox --kwin-rule       Always open launcher + SC on the main screen (permanent KWin script)
+  idus-sc-toolbox --kwin-remove     Remove that KWin script again
   idus-sc-toolbox --shaders         Clear SC's shader cache (NO prompt in CLI! use with care)
   idus-sc-toolbox --driver-cache    (with --shaders) also clear the GPU driver cache
   idus-sc-toolbox --starstrings     Download latest StarStrings (LIVE) english global.ini
@@ -48,7 +49,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 BUILD = "2026-11-06"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
@@ -194,8 +195,13 @@ def act_kill(log):
         log(f"✅ wineserver -k ({name})" if r.returncode == 0
             else f"· wineserver -k ({name}): {r.stderr.strip() or 'nothing to kill'}")
     time.sleep(1)
-    left = subprocess.run(["pgrep", "-af", "\\.exe"], capture_output=True, text=True).stdout.strip()
-    log("✅ no .exe processes left" if not left else f"❌ still running:\n{left}")
+    pre = os.path.realpath(PREFIX)
+    left = []
+    for line in subprocess.run(["pgrep", "-af", "\\.exe"], capture_output=True, text=True).stdout.splitlines():
+        pid = line.split(" ", 1)[0]
+        if _proc_prefix(pid) == pre:
+            left.append(line[:160])
+    log("✅ no Star Citizen processes left" if not left else "❌ still running:\n" + "\n".join(left))
 
 
 def act_start_launcher(log, patch=False):
@@ -826,75 +832,109 @@ def _dbus(*args):
                           capture_output=True, text=True)
 
 
-KWIN_RAISE_JS = r"""
-// Idus SC Toolbox: when the RSI Launcher opens, centre it on the main screen and bring it
-// to the front (the same as "Fix windows now").
-// - A launcher started from inside an app gets no KDE start token, so KWin's focus-stealing
-//   prevention would open it *behind* the active window.
-// - The launcher can also restore an old position outside the visible screens; while this
-//   script is loaded (3 min) it is pulled back to the main screen if it lands off-screen.
-const seen = {};
-function screenList() {
-    try { return workspace.screens || []; } catch (e) { return []; }
-}
+KWIN_PLACE_JS = r"""
+// Idus SC Toolbox: keep the RSI Launcher and Star Citizen on the main screen.
+// KDE opens new windows on the screen under the mouse ("active screen follows mouse"), and a
+// launcher started from inside an app opens behind the active window. This script:
+//  - finds the launcher / game by window class, name OR title (works with X11 and Wayland runners),
+//  - sends it to the main screen (by name), centres the launcher and brings it to the front,
+//  - re-applies that for 15 s while KDE finishes placing the window, unless you move it yourself,
+//  - later only pulls it back if it ends up outside every screen.
 const WANT = "__SCREEN_NAME__";
-function mainGeo() {
-    const scr = screenList();
-    if (scr.length) {
-        for (const s of scr) { if (WANT && s.name === WANT) return s.geometry; }
-        const s = (__SCREEN__ >= 0 && __SCREEN__ < scr.length) ? scr[__SCREEN__] : scr[0];
-        return s.geometry;
-    }
-    return workspace.clientArea(KWin.MaximizeArea, 0, workspace.currentDesktop);
+const IDX = __SCREEN__;
+const ENFORCE_MS = 15000;
+const state = {};
+function screens() { try { return workspace.screens || []; } catch (e) { return []; } }
+function mainOut() {
+    const s = screens();
+    for (const o of s) { if (WANT && o.name === WANT) return o; }
+    return s.length ? ((IDX >= 0 && IDX < s.length) ? s[IDX] : s[0]) : null;
 }
-function onScreen(g) {
+function inside(g, a) {
     const cx = g.x + g.width / 2, cy = g.y + g.height / 2;
-    const scr = screenList();
-    if (!scr.length) return true;
-    for (const s of scr) {
-        const a = s.geometry;
-        if (cx >= a.x && cx < a.x + a.width && cy >= a.y && cy < a.y + a.height) return true;
-    }
+    return cx >= a.x && cx < a.x + a.width && cy >= a.y && cy < a.y + a.height;
+}
+function onAnyScreen(g) {
+    const s = screens();
+    if (!s.length) return true;
+    for (const o of s) { if (inside(g, o.geometry)) return true; }
     return false;
 }
-function centre(w) {
-    const m = mainGeo(), g = w.frameGeometry;
-    w.frameGeometry = { x: Math.round(m.x + (m.width - g.width) / 2),
-                        y: Math.round(m.y + (m.height - g.height) / 2),
-                        width: g.width, height: g.height };
-}
-function isLauncher(w) {
+function kind(w) {
+    if (!w || !w.normalWindow) return "";
     const cap = (w.caption || "").toLowerCase();
     const cls = (w.resourceClass || "").toLowerCase();
     const nm = (w.resourceName || "").toLowerCase();
-    return cls.includes("rsi launcher") || nm.includes("rsi launcher") || cap.includes("rsi launcher");
+    if (cls.includes("rsi launcher") || nm.includes("rsi launcher") || cap.includes("rsi launcher")) return "launcher";
+    if (cls.includes("starcitizen") || nm.includes("starcitizen") || cap === "star citizen") return "game";
+    return "";
 }
-function bring(w) {
-    if (!w || !w.normalWindow || !isLauncher(w)) return;
-    const id = String(w.internalId);
-    if (seen[id]) return;
-    seen[id] = true;
-    w.minimized = false;
-    centre(w);
+function activate(w) {
     if ("activeWindow" in workspace) { workspace.activeWindow = w; } else { workspace.activeClient = w; }
-    if (w.frameGeometryChanged) {
-        w.frameGeometryChanged.connect(function () { if (!onScreen(w.frameGeometry)) centre(w); });
+}
+function place(w, k) {
+    const out = mainOut();
+    if (!out) return;
+    if (!inside(w.frameGeometry, out.geometry)) {
+        try { workspace.sendClientToScreen(w, out); } catch (e) {}
     }
+    if (k === "launcher") {
+        const a = out.geometry, g = w.frameGeometry;
+        w.frameGeometry = { x: Math.round(a.x + (a.width - g.width) / 2),
+                            y: Math.round(a.y + (a.height - g.height) / 2),
+                            width: g.width, height: g.height };
+    } else if (!inside(w.frameGeometry, out.geometry)) {
+        const a = out.geometry;
+        w.frameGeometry = { x: a.x, y: a.y, width: a.width, height: a.height };
+    }
+}
+function handle(w) {
+    const k = kind(w);
+    if (!k) return;
+    const id = String(w.internalId);
+    if (state[id]) return;
+    const st = state[id] = { t: Date.now(), user: false };
+    w.minimized = false;
+    place(w, k);
+    if (k === "launcher") activate(w);
+    if (w.interactiveMoveResizeStarted) { w.interactiveMoveResizeStarted.connect(function () { st.user = true; }); }
+    const recheck = function () {
+        const out = mainOut();
+        if (!out) return;
+        if (!st.user && Date.now() - st.t < ENFORCE_MS) {
+            if (!inside(w.frameGeometry, out.geometry)) place(w, k);
+        } else if (!onAnyScreen(w.frameGeometry)) {
+            place(w, k);
+        }
+    };
+    if (w.frameGeometryChanged) w.frameGeometryChanged.connect(recheck);
+    if (w.outputChanged) w.outputChanged.connect(recheck);
 }
 const added = workspace.windowAdded || workspace.clientAdded;
 added.connect(function (w) {
-    bring(w);
-    if (w.captionChanged) { w.captionChanged.connect(function () { bring(w); }); }
+    handle(w);
+    if (w.captionChanged) { w.captionChanged.connect(function () { handle(w); }); }
 });
 """
+KWIN_RAISE_JS = KWIN_PLACE_JS  # name kept for older references
+KWIN_PLACE_ID = "idus-sc-toolbox-placement"
+KWIN_PLACE_DIR = Path.home() / ".local/share/kwin/scripts" / KWIN_PLACE_ID
 KWIN_RAISE_NAME = "idus-sc-toolbox-raise"
 
 
+def _kwin_script_loaded(name) -> bool:
+    r = _dbus("/Scripting", "org.kde.kwin.Scripting.isScriptLoaded", f"string:{name}")
+    return "boolean true" in r.stdout
+
+
 def kwin_raise_launcher(log, seconds=180) -> bool:
-    """Load a short-lived KWin script that activates the RSI Launcher window when it appears,
-    and unload it again after `seconds` (detached, so it also works from the CLI)."""
+    """Load a short-lived copy of the placement script for this launch (unloaded after
+    `seconds`, detached so it also works from the CLI). Not needed when the permanent
+    placement script is installed and running."""
     if not shutil.which("dbus-send"):
         return False
+    if _kwin_script_loaded(KWIN_PLACE_ID):
+        return True
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
         f.write(_screen_js(KWIN_RAISE_JS))
         js = f.name
@@ -934,71 +974,91 @@ def act_fix_windows(log, screen=None):
     log(f"✅ launcher centred + SC moved to the main screen {sname or idx} ('Wine System Tray' minimised)")
 
 
-def act_install_kwin_rule(log, screen=None):
-    """Writes a permanent KWin rule that forces the RSI Launcher and Star Citizen
-    onto the main screen. Backs up kwinrulesrc first and is idempotent."""
-    idx, sname = main_screen(screen)
+def _kwriteconfig(*args) -> bool:
+    for tool in ("kwriteconfig6", "kwriteconfig5"):
+        if shutil.which(tool):
+            return subprocess.run([tool, *args], capture_output=True).returncode == 0
+    return False
+
+
+def _remove_old_screen_rules(log):
+    """Older versions pinned the windows with KWin *rules* that forced a screen number. Those
+    rules fight the placement script (and often never matched Wayland windows). Remove them;
+    kwinrulesrc is backed up first."""
     rc = Path.home() / ".config/kwinrulesrc"
+    if not rc.is_file() or "SC Toolbox" not in rc.read_text(errors="ignore"):
+        return
     import configparser
     cp = configparser.RawConfigParser()
     cp.optionxform = str
-    if rc.is_file():
-        shutil.copy2(rc, rc.with_suffix(".sctoolbox.bak"))
-        try:
-            cp.read(rc, encoding="utf-8")
-        except Exception as e:  # noqa
-            log(f"❌ could not read kwinrulesrc: {e} — aborting without writing")
-            return
-
-    # Remove any previous SC Toolbox rules (idempotent). Description prefix kept as
-    # "SC Toolbox" for backwards compatibility with existing rules.
-    old_uuids = [s for s in cp.sections()
-                 if s != "General" and cp.has_option(s, "Description")
-                 and cp.get(s, "Description").startswith("SC Toolbox")]
-    for s in old_uuids:
+    try:
+        cp.read(rc, encoding="utf-8")
+    except Exception as e:  # noqa
+        log(f"⚠️  could not read kwinrulesrc ({e}) — old rules left in place")
+        return
+    shutil.copy2(rc, rc.with_suffix(".sctoolbox.bak"))
+    old = [s for s in cp.sections() if s != "General" and cp.has_option(s, "Description")
+           and cp.get(s, "Description").startswith("SC Toolbox")]
+    for s in old:
         cp.remove_section(s)
-
-    def add_rule(desc, wmclass, extra=None):
-        u = str(uuid.uuid4())
-        cp.add_section(u)
-        cp.set(u, "Description", desc)
-        cp.set(u, "wmclass", wmclass)
-        cp.set(u, "wmclassmatch", "2")   # 2 = substring
-        cp.set(u, "wmclasscomplete", "false")
-        cp.set(u, "screen", str(idx))
-        cp.set(u, "screenrule", "2")      # 2 = force
-        cp.set(u, "ignoregeometry", "true")
-        cp.set(u, "ignoregeometryrule", "2")
-        for k, v in (extra or {}).items():
-            cp.set(u, k, v)
-        return u
-
-    new = [
-        add_rule("SC Toolbox – RSI Launcher", "rsi launcher.exe",
-                 {"placement": "Centered", "placementrule": "2"}),
-        add_rule("SC Toolbox – Star Citizen", "starcitizen.exe",
-                 {"fullscreen": "true", "fullscreenrule": "2"}),
-    ]
-
-    existing = [s for s in cp.sections() if s != "General" and s not in new]
-    rules_list = [s for s in existing] + new
+    keep = [s for s in cp.sections() if s != "General"]
     if not cp.has_section("General"):
         cp.add_section("General")
-    cp.set("General", "count", str(len(rules_list)))
-    cp.set("General", "rules", ",".join(rules_list))
+    cp.set("General", "count", str(len(keep)))
+    cp.set("General", "rules", ",".join(keep))
+    with open(rc, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=False)
+    log(f"· removed {len(old)} old SC Toolbox window rule(s) (backup: kwinrulesrc.sctoolbox.bak)")
 
-    try:
-        rc.parent.mkdir(parents=True, exist_ok=True)
-        with open(rc, "w", encoding="utf-8") as f:
-            cp.write(f, space_around_delimiters=False)
-    except Exception as e:  # noqa
-        log(f"❌ could not write kwinrulesrc: {e}")
-        return
-    subprocess.run(["dbus-send", "--session", "--dest=org.kde.KWin", "/KWin",
-                    "org.kde.KWin.reconfigure"], capture_output=True)
-    log(f"✅ KWin rule installed: pins RSI Launcher + Star Citizen to {sname or 'screen'} (KWin screen {idx})")
-    log("⚠️  verify in System Settings → Window Management → Window Rules. "
-        "Backup saved as kwinrulesrc.sctoolbox.bak")
+
+def act_install_kwin_rule(log, screen=None):
+    """📌 Permanent: install a KWin script that puts the RSI Launcher and Star Citizen on the main
+    screen every time they open (any runner, X11 or Wayland). Shows up in System Settings →
+    Window Management → KWin Scripts, where it can be switched off."""
+    idx, sname = main_screen(screen)
+    code = KWIN_PLACE_DIR / "contents/code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "main.js").write_text(_screen_js(KWIN_PLACE_JS, screen))
+    (KWIN_PLACE_DIR / "metadata.json").write_text(json.dumps({
+        "KPlugin": {
+            "Id": KWIN_PLACE_ID,
+            "Name": "Idus SC Toolbox – Star Citizen on the main screen",
+            "Description": "Puts the RSI Launcher and Star Citizen on the main screen when they open.",
+            "Authors": [{"Name": "Idus"}],
+            "License": "MIT",
+            "Version": APP_VERSION,
+            "Website": "https://github.com/Idus/idus-sc-toolbox",
+            "EnabledByDefault": False,
+        },
+        "X-Plasma-API": "javascript",
+        "X-Plasma-MainScript": "code/main.js",
+        "KPackageStructure": "KWin/Script",
+    }, indent=2))
+    _remove_old_screen_rules(log)
+    if not _kwriteconfig("--file", "kwinrc", "--group", "Plugins", "--key", f"{KWIN_PLACE_ID}Enabled", "true"):
+        log("⚠️  could not enable it in kwinrc (kwriteconfig6 missing) — tick it in System Settings → KWin Scripts")
+    # (re)load it now, so it works without logging out
+    _dbus("/Scripting", "org.kde.kwin.Scripting.unloadScript", f"string:{KWIN_PLACE_ID}")
+    _dbus("/Scripting", "org.kde.kwin.Scripting.unloadScript", f"string:{KWIN_RAISE_NAME}")
+    r = _dbus("/Scripting", "org.kde.kwin.Scripting.loadScript", f"string:{code / 'main.js'}", f"string:{KWIN_PLACE_ID}")
+    m = re.search(r"int32 (-?\d+)", r.stdout)
+    if m and m.group(1) != "-1":
+        _dbus(f"/Scripting/Script{m.group(1)}", "org.kde.kwin.Script.run")
+        log(f"✅ launcher + Star Citizen now open on {sname or 'the main screen'} — every time, also after a reboot")
+        log("   Switch off: System Settings → Window Management → KWin Scripts → 'Idus SC Toolbox'")
+    else:
+        log("❌ KWin did not load the script now — it starts after the next login")
+
+
+def act_uninstall_kwin_placement(log):
+    _dbus("/Scripting", "org.kde.kwin.Scripting.unloadScript", f"string:{KWIN_PLACE_ID}")
+    _kwriteconfig("--file", "kwinrc", "--group", "Plugins", "--key", f"{KWIN_PLACE_ID}Enabled", "false")
+    shutil.rmtree(KWIN_PLACE_DIR, ignore_errors=True)
+    log("✅ placement script removed")
+
+
+def kwin_placement_installed() -> bool:
+    return (KWIN_PLACE_DIR / "contents/code/main.js").is_file()
 
 
 def act_open_kwin_settings(log):
@@ -1308,6 +1368,7 @@ def cli():
     ap.add_argument("--diag", action="store_true")
     ap.add_argument("--fix-windows", action="store_true")
     ap.add_argument("--kwin-rule", action="store_true")
+    ap.add_argument("--kwin-remove", action="store_true")
     ap.add_argument("--shaders", action="store_true")
     ap.add_argument("--driver-cache", action="store_true")
     ap.add_argument("--starstrings", action="store_true")
@@ -1317,7 +1378,7 @@ def cli():
     ap.add_argument("--screen", default=None, help="main screen: KWin index or name, e.g. HDMI-A-1")
     a = ap.parse_args()
     triggers = [a.status, a.launch, a.kill, a.restart, a.restart_patch, a.backup, a.restore is not None, a.diag,
-                a.fix_windows, a.kwin_rule, a.shaders, a.starstrings, a.vram, a.quantum]
+                a.fix_windows, a.kwin_rule, a.kwin_remove, a.shaders, a.starstrings, a.vram, a.quantum]
     if not any(triggers):
         return False
     if a.status:
@@ -1338,6 +1399,8 @@ def cli():
         act_fix_windows(print, a.screen)
     if a.kwin_rule:
         act_install_kwin_rule(print, a.screen)
+    if a.kwin_remove:
+        act_uninstall_kwin_placement(print)
     if a.shaders:
         act_shaders(print, a.env, a.driver_cache)
     if a.starstrings:
@@ -1662,12 +1725,13 @@ def gui():
             self._btn(g, 0, 1, "🎯  Fix windows now",
                       lambda: self._run(act_fix_windows, None),
                       "Centres the launcher + moves SC to the main screen (one-shot, via KWin)")
-            self._btn(g, 1, 0, "📌  Install KWin rule (permanent)",
+            self._btn(g, 1, 0, "📌  Always on main screen",
                       lambda: self._confirm(
-                          "Install a permanent KWin rule that pins launcher + SC to the main screen?\n\n"
-                          "kwinrulesrc is backed up first.",
+                          "Install a small KWin script that puts the RSI Launcher and Star Citizen on the "
+                          "main screen every time they open?\n\nIt replaces the old SC Toolbox window rules "
+                          "(kwinrulesrc is backed up) and can be switched off in System Settings → KWin Scripts.",
                           lambda: self._run(act_install_kwin_rule, None)),
-                      "Experimental – verify in Window Rules afterwards")
+                      "Permanent: launcher + game always open on the main screen, wherever the mouse is")
             self._btn(g, 1, 1, "⚙️  Open Window Rules",
                       lambda: self._run(act_open_kwin_settings))
             row = Gtk.Box(spacing=sc(10))
@@ -1891,8 +1955,8 @@ def gui():
             save_settings(s)
             self.log(f"✅ main screen: {name}")
             rc = Path.home() / ".config/kwinrulesrc"
-            if rc.is_file() and "SC Toolbox" in rc.read_text(errors="ignore"):
-                self.log("   updating the permanent KWin rule to the new screen …")
+            if kwin_placement_installed() or (rc.is_file() and "SC Toolbox" in rc.read_text(errors="ignore")):
+                self.log("   updating the permanent placement to the new screen …")
                 self._run(act_install_kwin_rule, None)
 
         def _follow_launcher_log(self):

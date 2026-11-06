@@ -108,7 +108,7 @@ The panel refreshes after every action and with **⟳ Refresh**.
 | | Auto-backup on launch | Takes one backup per day when the app starts |
 | Joystick & windows | Joystick diagnostics | Lists devices, flags duplicate instances, shows what SC expects |
 | | Fix windows now | One-shot: centre launcher + SC to main screen (KWin) |
-| | Install KWin rule | Permanent rule pinning launcher + SC to the main screen |
+| | Always on main screen | Installs a small KWin script: the launcher and SC open on the main screen every time (also with Wayland runners, wherever the mouse is). Switch off in System Settings → KWin Scripts or with `--kwin-remove` |
 | | Main screen | Which screen counts as the main one. Default: the screen KDE calls primary. Screens are tracked by name (e.g. `HDMI-A-1`), because KWin's own numbering is neither left to right nor primary first |
 | | Open Window Rules | Opens the KDE Window Rules settings |
 | Shaders & audio | Clear shader cache | Deletes SC shader cache (optionally the GPU driver cache too) |
@@ -122,7 +122,7 @@ Every action has a flag, for KDE global shortcuts or a Stream Deck:
 
 ```bash
 idus-sc-toolbox --launch | --status | --kill | --restart | --restart-patch | --fix-windows \
-                --backup | --restore | --diag | --starstrings | --vram | --kwin-rule \
+                --backup | --restore | --diag | --starstrings | --vram | --kwin-rule | --kwin-remove \
                 --shaders [--driver-cache] | --quantum on|off | --env PTU | --screen N
 ```
 
@@ -173,7 +173,7 @@ and starts nothing, so it never quietly patches on the wrong runner.
   `Screen` number in Window Rules if a window lands on the wrong monitor.
 - **StarStrings also needs `USER.cfg`** (`g_language`) in the game root to take effect.
   The tool backs up and replaces the english `global.ini` only; it does not touch USER.cfg.
-- The KWin rule descriptions start with "SC Toolbox" for backwards compatibility.
+- "Always on main screen" is a KWin script (`~/.local/share/kwin/scripts/idus-sc-toolbox-placement`), not a window rule. Installing it removes the old "SC Toolbox" window rules (backup: `kwinrulesrc.sctoolbox.bak`).
 - **Hardware-specific features:** the VRAM check is **NVIDIA only** (reads `nvidia-smi`, any
   NVIDIA card), and the joystick diagnostics are tuned for **VIRPIL** HOTAS. Everything else
   is vendor-agnostic.

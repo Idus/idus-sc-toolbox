@@ -3,6 +3,23 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3.7] - 2026-11-06
+
+### Changed
+- 📌 **Always on main screen** replaces "Install KWin rule". KDE opens new windows on the screen
+  under the mouse, and the old window rules often didn't recognise the launcher and game with a
+  Wayland runner, so they followed the mouse. The button now installs a small KWin script that
+  finds the launcher and Star Citizen by class *or* title, sends them to the main screen, centres
+  the launcher and brings it to the front — every time they open, also after a reboot. For 15 s it
+  re-applies that while KDE finishes placing the window, unless you move it yourself. The old
+  SC Toolbox window rules are removed (backup: `kwinrulesrc.sctoolbox.bak`). Switch it off in
+  System Settings → Window Management → KWin Scripts, or with `--kwin-remove`.
+- ▶ Launch / Restart / Patch use the same logic for that launch when the script isn't installed.
+
+### Fixed
+- "❌ still running" after Kill listed Wine programs that have nothing to do with Star Citizen
+  (e.g. OpenDeck plugins in their own prefix). It now only lists Star Citizen's own processes.
+
 ## [1.3.6] - 2026-11-06
 
 ### Fixed
