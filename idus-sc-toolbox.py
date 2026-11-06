@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3.5  ·  build 2026-11-06
+#  Idus SC Toolbox  ·  v1.3.6  ·  build 2026-11-06
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -24,7 +24,7 @@ GUI launches with no arguments. Same actions via CLI (KDE shortcuts / Stream Dec
   idus-sc-toolbox --starstrings     Download latest StarStrings (LIVE) english global.ini
   idus-sc-toolbox --quantum on|off  PipeWire clock.force-quantum 2048 / reset
   --env PTU                         target an environment other than LIVE
-  --screen N                        main-screen index for the window fixes (default from settings)
+  --screen N|NAME                   main screen for the window fixes, e.g. HDMI-A-1 (default: KDE primary)
 
 Dependencies (CachyOS / Arch):  sudo pacman -S --needed python-gobject gtk4
 """
@@ -48,7 +48,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
 BUILD = "2026-11-06"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
@@ -67,7 +67,7 @@ LAUNCH_SH = PREFIX / "sc-launch.sh"
 APPDATA_LOCAL = PREFIX / f"drive_c/users/{WIN_USER}/AppData/Local"
 PROCESS_PATTERNS = ["StarCitizen.exe", "RSI Launcher.exe", "RSI Launcher", "rsilauncher"]
 
-DEFAULT_SETTINGS = {"autobackup": False, "last_autobackup": "", "main_screen": 0}
+DEFAULT_SETTINGS = {"autobackup": False, "last_autobackup": "", "main_screen": 0, "main_screen_name": ""}
 
 
 # ---------------------------------------------------------------- settings
@@ -711,20 +711,85 @@ def act_diag(log, env="LIVE"):
 
 
 # ---------------------------------------------------------------- action: KWin windows
-def _main_screen_arg(screen=None) -> int:
-    if screen is None:
-        screen = load_settings().get("main_screen", 0)
+def kde_screens() -> list:
+    """Enabled screens as KDE sees them, left to right:
+    [{'name', 'primary', 'x', 'y', 'w', 'h'}] from `kscreen-doctor -o` ([] if unavailable)."""
     try:
-        return int(screen)
-    except (TypeError, ValueError):
-        return 0
+        r = subprocess.run(["kscreen-doctor", "-o"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    out, cur = [], None
+    for line in re.sub(r"\x1b\[[0-9;]*m", "", r.stdout).splitlines():
+        m = re.match(r"\s*Output:\s+\d+\s+(\S+)", line)
+        if m:
+            cur = dict(name=m.group(1), enabled=False, primary=False, x=0, y=0, w=0, h=0)
+            out.append(cur)
+            continue
+        if cur is None:
+            continue
+        s = line.strip()
+        if s == "enabled":
+            cur["enabled"] = True
+        elif s.startswith("priority"):
+            cur["primary"] = s.split()[-1] == "1"
+        elif s == "primary":  # older Plasma
+            cur["primary"] = True
+        m = re.match(r"Geometry:\s*(-?\d+),(-?\d+)\s+(\d+)x(\d+)", s)
+        if m:
+            cur.update(x=int(m.group(1)), y=int(m.group(2)), w=int(m.group(3)), h=int(m.group(4)))
+    return sorted((o for o in out if o["enabled"]), key=lambda o: (o["x"], o["y"]))
+
+
+def kwin_screen_order() -> list:
+    """Screen names in KWin's own numbering (used by window rules and KWin scripts)."""
+    try:
+        r = _dbus("/KWin", "org.kde.KWin.supportInformation")
+    except OSError:
+        return []
+    names, want = [], False
+    for line in r.stdout.splitlines():
+        s = line.strip()
+        if re.match(r"Screen \d+:", s):
+            want = True
+        elif want and s.startswith("Name:"):
+            names.append(s.split(":", 1)[1].strip())
+            want = False
+    return names
+
+
+def main_screen(screen=None):
+    """(KWin index, name) of the main screen. Order: --screen (index or name) > the screen chosen
+    in the Toolbox > KDE's primary screen > the old index setting > 0. KWin numbers screens its
+    own way (not left to right, not primary first), so the screen is tracked by name."""
+    order = kwin_screen_order()
+    s = load_settings()
+    choice = screen if screen not in (None, "") else (s.get("main_screen_name") or None)
+    if choice is not None and str(choice).isdigit():
+        i = int(choice)
+        return i, (order[i] if i < len(order) else "")
+    name = choice or next((o["name"] for o in kde_screens() if o["primary"]), None)
+    if name and name in order:
+        return order.index(name), name
+    i = int(s.get("main_screen", 0) or 0)
+    return i, (order[i] if i < len(order) else (name or ""))
+
+
+def _main_screen_arg(screen=None) -> int:
+    return main_screen(screen)[0]
+
+
+def _screen_js(src: str, screen=None) -> str:
+    idx, name = main_screen(screen)
+    return src.replace('"__SCREEN_NAME__"', json.dumps(name)).replace("__SCREEN__", str(idx))
 
 
 KWIN_FIX_JS = r"""
+const WANT = "__SCREEN_NAME__";
 function geoForScreen(idx) {
     try {
         const scr = workspace.screens;
         if (scr && scr.length) {
+            for (const s of scr) { if (WANT && s.name === WANT) return s.geometry; }
             const s = (idx >= 0 && idx < scr.length) ? scr[idx] : scr[0];
             return s.geometry;
         }
@@ -772,9 +837,11 @@ const seen = {};
 function screenList() {
     try { return workspace.screens || []; } catch (e) { return []; }
 }
+const WANT = "__SCREEN_NAME__";
 function mainGeo() {
     const scr = screenList();
     if (scr.length) {
+        for (const s of scr) { if (WANT && s.name === WANT) return s.geometry; }
         const s = (__SCREEN__ >= 0 && __SCREEN__ < scr.length) ? scr[__SCREEN__] : scr[0];
         return s.geometry;
     }
@@ -829,7 +896,7 @@ def kwin_raise_launcher(log, seconds=180) -> bool:
     if not shutil.which("dbus-send"):
         return False
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
-        f.write(KWIN_RAISE_JS.replace("__SCREEN__", str(_main_screen_arg())))
+        f.write(_screen_js(KWIN_RAISE_JS))
         js = f.name
     _dbus("/Scripting", "org.kde.kwin.Scripting.unloadScript", f"string:{KWIN_RAISE_NAME}")
     r = _dbus("/Scripting", "org.kde.kwin.Scripting.loadScript", f"string:{js}", f"string:{KWIN_RAISE_NAME}")
@@ -847,8 +914,8 @@ def kwin_raise_launcher(log, seconds=180) -> bool:
 
 
 def act_fix_windows(log, screen=None):
-    idx = _main_screen_arg(screen)
-    js_src = KWIN_FIX_JS.replace("__SCREEN__", str(idx))
+    idx, sname = main_screen(screen)
+    js_src = _screen_js(KWIN_FIX_JS, screen)
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
         f.write(js_src)
         js = f.name
@@ -864,13 +931,13 @@ def act_fix_windows(log, screen=None):
     time.sleep(0.5)
     _dbus("/Scripting", "org.kde.kwin.Scripting.unloadScript", f"string:{name}")
     os.unlink(js)
-    log(f"✅ launcher centred + SC moved to screen {idx} ('Wine System Tray' minimised)")
+    log(f"✅ launcher centred + SC moved to the main screen {sname or idx} ('Wine System Tray' minimised)")
 
 
 def act_install_kwin_rule(log, screen=None):
     """Writes a permanent KWin rule that forces the RSI Launcher and Star Citizen
     onto the main screen. Backs up kwinrulesrc first and is idempotent."""
-    idx = _main_screen_arg(screen)
+    idx, sname = main_screen(screen)
     rc = Path.home() / ".config/kwinrulesrc"
     import configparser
     cp = configparser.RawConfigParser()
@@ -929,7 +996,7 @@ def act_install_kwin_rule(log, screen=None):
         return
     subprocess.run(["dbus-send", "--session", "--dest=org.kde.KWin", "/KWin",
                     "org.kde.KWin.reconfigure"], capture_output=True)
-    log(f"✅ KWin rule installed: pins RSI Launcher + Star Citizen to screen {idx}")
+    log(f"✅ KWin rule installed: pins RSI Launcher + Star Citizen to {sname or 'screen'} (KWin screen {idx})")
     log("⚠️  verify in System Settings → Window Management → Window Rules. "
         "Backup saved as kwinrulesrc.sctoolbox.bak")
 
@@ -1247,7 +1314,7 @@ def cli():
     ap.add_argument("--vram", action="store_true")
     ap.add_argument("--quantum", choices=["on", "off"])
     ap.add_argument("--env", default="LIVE")
-    ap.add_argument("--screen", type=int, default=None)
+    ap.add_argument("--screen", default=None, help="main screen: KWin index or name, e.g. HDMI-A-1")
     a = ap.parse_args()
     triggers = [a.status, a.launch, a.kill, a.restart, a.restart_patch, a.backup, a.restore is not None, a.diag,
                 a.fix_windows, a.kwin_rule, a.shaders, a.starstrings, a.vram, a.quantum]
@@ -1603,6 +1670,28 @@ def gui():
                       "Experimental – verify in Window Rules afterwards")
             self._btn(g, 1, 1, "⚙️  Open Window Rules",
                       lambda: self._run(act_open_kwin_settings))
+            row = Gtk.Box(spacing=sc(10))
+            lbl = Gtk.Label(label="Main screen:")
+            lbl.add_css_class("env-lbl")
+            row.append(lbl)
+            self.screens = kde_screens()
+            names = [o["name"] for o in self.screens]
+            pos = (["only screen"] if len(names) == 1 else ["left", "right"] if len(names) == 2
+                   else ["left", "middle", "right"] if len(names) == 3
+                   else [f"{i + 1}. from left" for i in range(len(names))])
+            labels = [f"{o['name']} · {p} · {o['w']}×{o['h']}" + (" · KDE primary" if o["primary"] else "")
+                      for o, p in zip(self.screens, pos)] or ["(no screen info)"]
+            self.screen_box = Gtk.DropDown.new_from_strings(labels)
+            self.screen_box.set_hexpand(True)
+            cur = main_screen()[1]
+            if cur in names:
+                self.screen_box.set_selected(names.index(cur))
+            self.screen_box.set_tooltip_text(
+                "Where Fix windows, the KWin rule and ▶ Launch put the launcher and the game. "
+                "Default: the screen KDE calls primary.")
+            self.screen_box.connect("notify::selected", lambda *_: self._screen_changed())
+            row.append(self.screen_box)
+            g.attach(row, 0, 2, 2, 1)
 
             # 5 · Shaders / audio
             g = self._group(right, "5 · Shaders & audio")
@@ -1789,6 +1878,22 @@ def gui():
                     pass
             dlg.choose(self, None, cb)
             return False
+
+        def _screen_changed(self):
+            i = self.screen_box.get_selected()
+            if not self.screens or i >= len(self.screens):
+                return
+            name = self.screens[i]["name"]
+            s = load_settings()
+            if s.get("main_screen_name") == name:
+                return
+            s["main_screen_name"] = name
+            save_settings(s)
+            self.log(f"✅ main screen: {name}")
+            rc = Path.home() / ".config/kwinrulesrc"
+            if rc.is_file() and "SC Toolbox" in rc.read_text(errors="ignore"):
+                self.log("   updating the permanent KWin rule to the new screen …")
+                self._run(act_install_kwin_rule, None)
 
         def _follow_launcher_log(self):
             f = launcher_log_file()

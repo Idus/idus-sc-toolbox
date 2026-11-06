@@ -109,6 +109,7 @@ The panel refreshes after every action and with **⟳ Refresh**.
 | Joystick & windows | Joystick diagnostics | Lists devices, flags duplicate instances, shows what SC expects |
 | | Fix windows now | One-shot: centre launcher + SC to main screen (KWin) |
 | | Install KWin rule | Permanent rule pinning launcher + SC to the main screen |
+| | Main screen | Which screen counts as the main one. Default: the screen KDE calls primary. Screens are tracked by name (e.g. `HDMI-A-1`), because KWin's own numbering is neither left to right nor primary first |
 | | Open Window Rules | Opens the KDE Window Rules settings |
 | Shaders & audio | Clear shader cache | Deletes SC shader cache (optionally the GPU driver cache too) |
 | | PipeWire quantum 2048 / Reset | Audio-stutter workaround |

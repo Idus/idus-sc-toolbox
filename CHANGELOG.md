@@ -3,6 +3,20 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3.6] - 2026-11-06
+
+### Fixed
+- The launcher and the game could land on the wrong screen (e.g. the left one), whatever you ran:
+  Fix windows, the permanent KWin rule and the automatic centring (1.3.2) all used "screen 0".
+  KWin numbers screens its own way (neither left to right nor primary first), so screen 0 was
+  not the main screen. The Toolbox now tracks the main screen **by name** (e.g. `HDMI-A-1`) and
+  uses the screen KDE calls primary by default.
+
+### Added
+- **Main screen** chooser in group 4 (name, position and resolution of each screen). Changing it
+  also updates the permanent KWin rule if you installed one.
+- `--screen` takes a name as well as a number, e.g. `--fix-windows --screen HDMI-A-1`.
+
 ## [1.3.5] - 2026-11-06
 
 ### Fixed
