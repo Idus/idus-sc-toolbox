@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idus SC Toolbox installer  ·  v1.3.4  ·  build 2026-11-06
+# Idus SC Toolbox installer  ·  v1.3.5  ·  build 2026-11-06
 # Installs Idus SC Toolbox (GTK4) as a self-contained folder in ~/.local/share/idus-sc-toolbox
 # + a start-menu entry with icon and right-click actions.
 # The Wine prefix is auto-detected from the LUG config → works on any machine.

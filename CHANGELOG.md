@@ -3,6 +3,12 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.3.5] - 2026-11-06
+
+### Fixed
+- The version line under the title was hard to read (small, thin, grey — a 3 barely looked
+  like a 3). It is now larger, semi-bold and in the soft blue, so it reads clearly.
+
 ## [1.3.4] - 2026-11-06
 
 ### Fixed

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3.4  ·  build 2026-11-06
+#  Idus SC Toolbox  ·  v1.3.5  ·  build 2026-11-06
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -48,7 +48,7 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 BUILD = "2026-11-06"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
@@ -2061,8 +2061,8 @@ def gui():
             window {{ background-color: {C['bg']}; color: {C['fg']}; font-family: {BODY}; font-size: {f}px; }}
             .app-title {{ font-family: {DISPLAY}; font-size: {int(30*S)}px; font-weight: 700;
                           letter-spacing: 0.3px; color: {C['title']}; padding-bottom: {sc(2)}px; }}
-            .app-ver {{ font-family: {MONO}; font-size: {int(11*S)}px; font-weight: 500;
-                        letter-spacing: 1px; color: {C['muted']}; }}
+            .app-ver {{ font-family: {MONO}; font-size: {int(13*S)}px; font-weight: 600;
+                        letter-spacing: 1px; color: {C['soft']}; }}
             .env-lbl {{ color: {C['muted']}; }}
             .pill {{ font-size: {int(12*S)}px; padding: {sc(3)}px {sc(10)}px; border-radius: 999px;
                      border: 1px solid {C['line']}; background-color: {C['surface']}; }}
