@@ -6,12 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: 
 ## [1.4] - 2026-11-20
 
 ### Added
-- 🧭 **Joystick order (js1, js2 …)** — choose which device is js1, js2 … (↑ ↓, or "sticks first,
-  virtual last"). The window shows where Star Citizen has each device now and the console line
-  that puts it back (`pp_resortdevices joystick 3 2`) with a Copy button. Made for the
-  Idus Button Box, a virtual joystick that can land between your sticks and shift their numbers.
-- Joystick diagnostics and ▶ Launch say when Star Citizen's order differs from the one you chose,
-  and give the console lines. CLI: `--joy-order`.
+- 🧭 **Joystick numbers (js1, js2 …)** — Star Citizen numbers joysticks in the order it finds them,
+  and every binding names a number. A new or missing device (e.g. the Idus Button Box from
+  OpenDeck) moves the devices after it, and their bindings point at the wrong device. The window
+  shows how Star Citizen numbered each device last session, which numbers your bindings are for
+  (**✓ Bindings are right now** saves them) and whether each device is connected now.
+- When the numbers changed for good, it moves the bindings with the devices: the console lines
+  (`pp_resortdevices joystick 2 3`, with a Copy button), or — with the game closed, after two
+  warnings — the same change in `actionmaps.xml`: every `jsN_…` binding and the per-device settings
+  (invert, curves) follow their device. Backup next to the file first; nothing is written unless
+  the result is valid XML.
+- ▶ Launch warns when a saved device is not connected (e.g. OpenDeck not running), before Star
+  Citizen numbers the rest differently. Joystick diagnostics reports it too. CLI: `--joy-order`.
 
 ## [1.3.7] - 2026-11-06
 

@@ -106,8 +106,8 @@ The panel refreshes after every action and with **⟳ Refresh**.
 | Backup | Back up now | Tars `user/` (keybinds, attributes), USER.cfg, sc-launch.sh → `~/SC-backups`. The group shows when the last backup was taken |
 | | Restore latest backup | Safety-copies current state, then unpacks the latest backup |
 | | Auto-backup on launch | Takes one backup per day when the app starts |
-| Joystick & windows | Joystick diagnostics | Lists devices, flags duplicate instances, shows what SC expects — and whether the joystick order is the one you chose |
-| | Joystick order (js1, js2 …) | Choose which device is js1, js2 … (↑ ↓; suggestion: sticks first, virtual devices like the [Idus Button Box](https://github.com/Idus/idus-button-box) last). Shows where Star Citizen has them now and the console line that puts them back (`pp_resortdevices joystick 3 2`, with a Copy button). ▶ Launch warns when the order is off. [More below](#joystick-order)
+| Joystick & windows | Joystick diagnostics | Lists devices, flags duplicate instances, shows what SC expects — and whether the joystick numbers are the ones your bindings are for |
+| | Joystick numbers (js1, js2 …) | Which js number your bindings are for. Shows how Star Citizen numbered each device last session, whether it is connected now, and — when the numbers changed for good — moves the bindings with the devices: the console line (`pp_resortdevices joystick 2 3`, Copy button) or, with the game closed, in `actionmaps.xml` after two warnings (backup first). ▶ Launch warns when a saved device is not connected (e.g. OpenDeck not running for the [Idus Button Box](https://github.com/Idus/idus-button-box)). [More below](#joystick-numbers)
 | | Fix windows now | One-shot: centre launcher + SC to main screen (KWin) |
 | | Always on main screen | Installs a small KWin script: the launcher and SC open on the main screen every time (also with Wayland runners, wherever the mouse is). Switch off in System Settings → KWin Scripts or with `--kwin-remove` |
 | | Main screen | Which screen counts as the main one. Default: the screen KDE calls primary. Screens are tracked by name (e.g. `HDMI-A-1`), because KWin's own numbering is neither left to right nor primary first |
@@ -131,25 +131,29 @@ idus-sc-toolbox --launch | --status | --kill | --restart | --restart-patch | --f
 patch mode. Right-clicking the Toolbox in the start menu offers **▶ Launch** and
 **🩹 Patch / verify launcher** too, so you can use it as your Star Citizen shortcut.
 
-## Joystick order
+## Joystick numbers
 
-Star Citizen numbers joysticks js1, js2 … and every binding names the number (`js2_button5`).
-When a new device appears — a virtual one like the Idus Button Box, or a stick on another USB
-port — it can land between your sticks: the left stick moves from js2 to js3 and its bindings
-point at the wrong device.
+Star Citizen numbers joysticks js1, js2 … in the order it finds them when it starts — you cannot
+choose that order — and every binding names a number (`js3_button5`). When a device is added or
+missing — a virtual one like the Idus Button Box, or a stick on another USB port — the devices
+after it move one number and their bindings point at the wrong device.
 
-**🧭 Joystick order** lists the devices Star Citizen saved in `actionmaps.xml`. Put them in the
-order your bindings expect and **Save my order**. From then on, Joystick diagnostics and ▶ Launch
-compare it with what Star Citizen saved after the last session and give the fix: one or more
-console lines (`§` in the game, one line at a time), e.g.
+The console command `pp_resortdevices joystick 2 3` does not renumber the devices: it **moves the
+bindings** — every `js2_…` binding becomes `js3_…` and the other way round, and the per-device
+settings (invert, curves) follow. Star Citizen saves that in `actionmaps.xml`.
 
-```
-pp_resortdevices joystick 3 2
-```
+**🧭 Joystick numbers**
 
-Star Citizen keeps the order until you reset its settings. Anything you bound while a device sat
-on the wrong number must be bound again. Start OpenDeck before the game, so the Idus Button Box
-is there when Star Citizen looks for devices.
+1. When your bindings work, press **✓ Bindings are right now**. The Toolbox remembers which number
+   each device had.
+2. **▶ Launch** warns when one of those devices is not connected — e.g. OpenDeck not running, so the
+   Idus Button Box is missing and the stick after it would be one number lower this session.
+3. When Star Citizen numbered the devices differently (Joystick diagnostics and the window show
+   it), decide: was a device just missing? Then start it before the game and change nothing.
+   Added or removed one for good? Move the bindings with the devices — the console lines (Copy
+   button; `§` in the game, one line at a time), or **Move bindings in actionmaps.xml** with the game
+   closed. That makes the same change as the console, after two warnings, with a backup
+   (`actionmaps.xml.sctoolbox-<time>.bak` next to it), and only if the result is valid XML.
 
 ## Patch mode (two runners)
 

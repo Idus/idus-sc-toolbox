@@ -17,7 +17,7 @@ GUI launches with no arguments. Same actions via CLI (KDE shortcuts / Stream Dec
   idus-sc-toolbox --backup          Back up config/keybinds (all environments)
   idus-sc-toolbox --restore [FILE]  Restore from backup (no FILE: latest). Safety copy first.
   idus-sc-toolbox --diag            Joystick diagnostics (OS devices, duplicates, what SC expects)
-  idus-sc-toolbox --joy-order       Joystick order (js1, js2 …) against the one you chose + console fix
+  idus-sc-toolbox --joy-order       Joystick numbers (js1, js2 …) against the ones your bindings are for + fix
   idus-sc-toolbox --fix-windows     Move launcher to centre + SC to main screen (one-shot, KWin)
   idus-sc-toolbox --kwin-rule       Always open launcher + SC on the main screen (permanent KWin script)
   idus-sc-toolbox --kwin-remove     Remove that KWin script again
@@ -511,6 +511,12 @@ def status_snapshot(env="LIVE") -> list:
 def act_launch(log):
     """▶ Launch: check RSI for a newer launcher first. Newer launcher → patch mode
     (the launcher updates itself on start, which has failed on the play runner)."""
+    try:
+        joy = joy_state("LIVE")
+        if joy["missing_now"] or joy["state"] == "moved":
+            joy_report(log, "LIVE", joy)
+    except Exception:
+        pass
     inst = installed_launcher_version()
     latest, err = latest_launcher_version(max_age=0)
     if latest and inst and vtuple(latest) > vtuple(inst):
@@ -714,18 +720,25 @@ def act_diag(log, env="LIVE"):
             log(f"· SC ({env}): no joystick instances in actionmaps.xml")
     else:
         log(f"· no actionmaps.xml found for {env}")
-    joy_order_report(log, env)
+    joy_report(log, env)
     log("— end —")
 
 
-# ---------------------------------------------------------------- joystick order (js1, js2 …)
-# Star Citizen numbers joysticks js1, js2 … and every binding names its number (js2_button5).
-# A new device — e.g. the Idus Button Box from OpenDeck — can land between your sticks, so a
-# stick moves from js2 to js3 and its bindings point at the wrong device. You choose the order
-# once (settings: joystick_order[env] = Product strings); the Toolbox checks it against what SC
-# saved in actionmaps.xml and gives the console commands that put it back
-# (pp_resortdevices joystick <now> <wanted>).
+# ---------------------------------------------------------------- joystick numbers (js1, js2 …)
+# Star Citizen numbers joysticks js1, js2 … in the order Windows/Wine lists them at start — you
+# cannot choose it. Every binding names a number (js2_button5), and per-device settings (invert,
+# curves) sit under that number in actionmaps.xml. When a device is added — e.g. the Idus Button
+# Box from OpenDeck — or missing, the devices after it move up or down one number and their
+# bindings point at the wrong device.
+# The fix is to move the bindings with the device, which is what the console command
+# "pp_resortdevices joystick A B" does: it swaps every jsA_… and jsB_… binding (and the per-device
+# settings) in actionmaps.xml. The device numbers themselves stay as Star Citizen sees them.
+# The Toolbox remembers the numbers your bindings are right for (settings:
+# joystick_layout[env] = {Product: instance}), compares them with what Star Citizen saved after
+# the last session, and moves the bindings — by console lines, or in actionmaps.xml with SC closed.
 JS_OPTIONS_RE = re.compile(r'<options\b[^>]*\btype="joystick"[^>]*>')
+JS_OPTIONS_ELEM_RE = re.compile(
+    r'(<options\b[^>]*\btype="joystick"[^>]*?)(?:\s*/>|>(.*?)</options>)', re.S)
 VIRTUAL_DEVICE_HINTS = ("idus button box", "vjoy", "virtual")
 
 
@@ -740,7 +753,8 @@ def joy_key(product: str) -> str:
 
 
 def joystick_devices(env="LIVE") -> list:
-    """Joysticks SC has in actionmaps.xml, by instance: [{instance, product, key, name, guid}]."""
+    """Joysticks SC saved in actionmaps.xml after the last session, by instance:
+    [{instance, product, key, name, guid}]."""
     am = profile_file(env, "actionmaps.xml")
     if not am or not am.is_file():
         return []
@@ -763,91 +777,199 @@ def is_virtual_device(name: str) -> bool:
     return any(h in low for h in VIRTUAL_DEVICE_HINTS)
 
 
-def suggested_order(devs: list) -> list:
-    """Real sticks and throttles first (in SC's current order), virtual devices last."""
-    return ([d["key"] for d in devs if not is_virtual_device(d["name"])]
-            + [d["key"] for d in devs if is_virtual_device(d["name"])])
-
-
-def wanted_joy_order(env="LIVE", settings=None) -> list:
+def saved_joy_layout(env="LIVE", settings=None) -> dict:
     s = settings if settings is not None else load_settings()
-    return list((s.get("joystick_order") or {}).get(env) or [])
+    return {k: int(v) for k, v in ((s.get("joystick_layout") or {}).get(env) or {}).items()}
 
 
-def save_joy_order(env: str, keys: list):
+def save_joy_layout(env: str, devs: list):
+    """Remember the numbers the bindings are right for (= what SC saved last session)."""
     s = load_settings()
-    s.setdefault("joystick_order", {})[env] = list(keys)
+    s.setdefault("joystick_layout", {})[env] = {d["key"]: d["instance"] for d in devs}
     save_settings(s)
 
 
-def joy_order_plan(devs: list, wanted: list):
-    """Where each device should be and the swaps that get it there.
-    Wanted devices first in your order, then devices you have not placed (in SC's order); they
-    share the instance numbers SC uses now. Returns (target {key: instance}, swaps [(now, to)]),
-    or (None, None) when two devices have the same Product string (SC cannot tell them apart)."""
-    keys = [d["key"] for d in devs]
-    if len(set(keys)) != len(keys):
-        return None, None
-    order = [k for k in dict.fromkeys(wanted) if k in keys] + [k for k in keys if k not in wanted]
-    slots = sorted(d["instance"] for d in devs)
-    target = {k: slots[i] for i, k in enumerate(order)}
-    pos = {d["key"]: d["instance"] for d in devs}
-    at = {d["instance"]: d["key"] for d in devs}
-    swaps = []
-    for k in order:
-        want, cur = target[k], pos[k]
-        if cur != want:
-            other = at[want]
-            swaps.append((cur, want))
-            pos[k], pos[other] = want, cur
-            at[want], at[cur] = k, other
-    return target, swaps
+def joy_move_plan(devs: list, saved: dict) -> dict:
+    """Where the bindings must go: {old js: new js} for every number that changes.
+    A device's bindings are on its saved number and must follow it to its number now. Numbers left
+    over (a new or a removed device) are paired up in order, so the result is a permutation."""
+    now = {d["key"]: d["instance"] for d in devs}
+    perm = {saved[k]: now[k] for k in now if k in saved}
+    src_free = sorted(set(now.values()) - set(perm) | (set(perm.values()) - set(perm)))
+    dst_free = sorted((set(perm) | set(now.values())) - set(perm.values()))
+    for a, b in zip(src_free, dst_free):
+        perm[a] = b
+    return {a: b for a, b in perm.items() if a != b}
+
+
+def joy_swaps(perm: dict) -> list:
+    """The permutation as swaps (a, b) — one console line each, in order."""
+    swaps, done = [], set()
+    for start in sorted(perm):
+        if start in done:
+            continue
+        cycle, cur = [start], perm[start]
+        while cur != start and cur in perm:
+            cycle.append(cur)
+            cur = perm[cur]
+        done.update(cycle)
+        for nxt in cycle[1:]:
+            swaps.append((start, nxt))
+    return swaps
 
 
 def resort_commands(swaps) -> list:
     return [f"pp_resortdevices joystick {a} {b}" for a, b in swaps]
 
 
-def joy_order_state(env="LIVE", wanted=None) -> dict:
-    """state: ok | differs | unset | none | ambiguous — plus devices, target and console commands."""
+def connected_input_names() -> list:
+    """Names of the input devices the kernel sees right now (/proc/bus/input/devices)."""
+    try:
+        txt = Path("/proc/bus/input/devices").read_text(errors="ignore")
+    except Exception:
+        return []
+    return [line.split("=", 1)[-1].strip().strip('"') for line in txt.splitlines() if line.startswith("N:")]
+
+
+def joy_connected(name: str, names=None) -> bool:
+    low = name.lower()
+    return any(low in n.lower() for n in (names if names is not None else connected_input_names()))
+
+
+def joy_state(env="LIVE") -> dict:
+    """state: none | unset | ok | moved | ambiguous.
+    moved: [(device, saved js, js now)]; new: devices not in the saved layout; missing_now:
+    saved devices that are not connected right now (start OpenDeck before SC!)."""
     devs = joystick_devices(env)
-    if wanted is None:
-        wanted = wanted_joy_order(env)
+    saved = saved_joy_layout(env)
+    names = connected_input_names()
+    missing_now = [k for k in saved if not joy_connected(_joy_name(k), names)] if names else []
+    base = dict(devs=devs, saved=saved, moved=[], new=[], perm={}, swaps=[], cmds=[], missing_now=missing_now)
     if not devs:
-        return dict(state="none", devs=[], target={}, swaps=[], cmds=[], wanted=wanted)
-    target, swaps = joy_order_plan(devs, wanted or suggested_order(devs))
-    if target is None:
-        return dict(state="ambiguous", devs=devs, target={}, swaps=[], cmds=[], wanted=wanted)
-    state = "unset" if not wanted else ("ok" if not swaps else "differs")
-    return dict(state=state, devs=devs, target=target, swaps=swaps, cmds=resort_commands(swaps), wanted=wanted)
+        return dict(base, state="none")
+    keys = [d["key"] for d in devs]
+    if len(set(keys)) != len(keys):
+        return dict(base, state="ambiguous")
+    if not saved:
+        return dict(base, state="unset")
+    moved = [(d, saved[d["key"]], d["instance"]) for d in devs if d["key"] in saved and saved[d["key"]] != d["instance"]]
+    new = [d for d in devs if d["key"] not in saved]
+    perm = joy_move_plan(devs, saved)
+    swaps = joy_swaps(perm)
+    return dict(base, state="moved" if perm else "ok", moved=moved, new=new, perm=perm,
+                swaps=swaps, cmds=resort_commands(swaps))
 
 
-def joy_order_report(log, env="LIVE", st=None):
-    st = st or joy_order_state(env)
+def _joy_name(key: str) -> str:
+    return re.sub(r"\s*\{[0-9A-Fa-f-]+\}\s*$", "", key).strip()
+
+
+def joy_report(log, env="LIVE", st=None):
+    st = st or joy_state(env)
     if st["state"] == "none":
         return
+    if st["missing_now"]:
+        log("⚠️  not connected now: " + ", ".join(_joy_name(k) for k in st["missing_now"])
+            + " — Star Citizen would number the devices after it differently and their bindings point "
+            "wrong. Start OpenDeck (Idus Button Box) / plug it in before the game.")
     if st["state"] == "ambiguous":
-        log("· joystick order: two devices have the same name and GUID — SC cannot tell them apart")
-        return
-    if st["state"] == "unset":
-        log("· joystick order: not chosen yet — 🧭 Joystick order (suggestion: sticks first, "
-            "virtual devices like the Idus Button Box last)")
-        if st["swaps"]:
-            moves = [f"{d['name']} js{d['instance']}→js{st['target'][d['key']]}"
-                     for d in st["devs"] if st["target"][d["key"]] != d["instance"]]
-            log("  with the suggestion: " + ", ".join(moves))
-        return
-    if st["state"] == "ok":
-        log(f"✅ joystick order as you chose it: " + ", ".join(f"js{d['instance']} {d['name']}" for d in st["devs"]))
-        return
-    log("⚠️  joystick order differs from your choice — bindings point at the wrong device:")
-    for d in st["devs"]:
-        to = st["target"][d["key"]]
-        if to != d["instance"]:
-            log(f"    {d['name']}: js{d['instance']} now, should be js{to}")
-    log("  Fix in Star Citizen: console (§), one line at a time:")
-    for c in st["cmds"]:
-        log(f"    {c}")
+        log("· joystick numbers: two devices have the same name and GUID — SC cannot tell them apart")
+    elif st["state"] == "unset":
+        log("· joystick numbers: not saved yet — when your bindings work, 🧭 Joystick numbers → "
+            "✓ Bindings are right now")
+    elif st["state"] == "ok":
+        log("✅ joystick numbers as saved: " + ", ".join(f"js{d['instance']} {d['name']}" for d in st["devs"]))
+    else:
+        log("⚠️  Star Citizen numbered the joysticks differently last session:")
+        for d, was, now in st["moved"]:
+            log(f"    {d['name']}: js{was} → js{now}")
+        for d in st["new"]:
+            log(f"    {d['name']}: new on js{d['instance']}")
+        log("  Was a device just missing (OpenDeck not running)? Start it before the game and leave the bindings.")
+        log("  Added or removed a device for good? Move the bindings with it — in the game console (§),")
+        log("  one line at a time, or with 🧭 Joystick numbers → Move bindings (SC closed):")
+        for c in st["cmds"]:
+            log(f"    {c}")
+
+
+def act_joy_move_bindings(log, env, perm: dict):
+    """What 'pp_resortdevices joystick A B' does, for a whole permutation at once: every jsA_…
+    binding moves to its new number, and so do the per-device settings under <options>. Only with
+    Star Citizen closed (it writes actionmaps.xml when it exits). Backup first; aborts if the result
+    is not valid XML. The device numbers in the Product lines stay as Star Citizen saw them."""
+    import xml.etree.ElementTree as ET
+    if game_running():
+        log("❌ Star Citizen is running — close it first (it rewrites actionmaps.xml when it exits)")
+        return False
+    am = profile_file(env, "actionmaps.xml")
+    if not am or not am.is_file():
+        log(f"❌ no actionmaps.xml for {env}")
+        return False
+    if not perm:
+        log("· nothing to move")
+        return True
+    txt = am.read_text(errors="strict")
+    try:
+        ET.fromstring(txt)
+    except ET.ParseError as e:
+        log(f"❌ actionmaps.xml is not valid XML ({e}) — left as it is")
+        return False
+
+    # 1 · bindings: input="js2_button5" → js3_button5 (all at once, so swaps do not collide)
+    moved = [0]
+
+    def rebind(m):
+        n = int(m.group(2))
+        if n in perm:
+            moved[0] += 1
+            return f'{m.group(1)}js{perm[n]}_'
+        return m.group(0)
+    new = re.sub(r'(\binput="\s*)js(\d+)_', rebind, txt)
+
+    # 2 · per-device settings (<options type="joystick" instance="N" …> children) follow too
+    elems = list(JS_OPTIONS_ELEM_RE.finditer(new))
+    body = {}
+    for m in elems:
+        inst = re.search(r'\binstance="(\d+)"', m.group(1))
+        if inst:
+            body[int(inst.group(1))] = m.group(2)
+    new_body = dict(body)
+    for a, b in perm.items():
+        if a in body:
+            new_body[b] = body[a]
+        elif b in new_body:
+            new_body[b] = None
+    for a, b in perm.items():  # a number nothing moves into keeps no settings
+        if a not in perm.values() and a in new_body:
+            new_body[a] = None
+    out, pos = [], 0
+    for m in elems:
+        inst = re.search(r'\binstance="(\d+)"', m.group(1))
+        out.append(new[pos:m.start()])
+        head = m.group(1)
+        b = new_body.get(int(inst.group(1))) if inst else m.group(2)
+        out.append(f"{head}>{b}</options>" if b and b.strip() else f"{head}/>")
+        pos = m.end()
+    out.append(new[pos:])
+    result = "".join(out)
+    try:
+        ET.fromstring(result)
+    except ET.ParseError as e:
+        log(f"❌ the result would not be valid XML ({e}) — actionmaps.xml left as it is")
+        return False
+
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = am.with_name(f"actionmaps.xml.sctoolbox-{stamp}.bak")
+    shutil.copy2(am, bak)
+    tmp = am.with_name("actionmaps.xml.sctoolbox-tmp")
+    tmp.write_text(result)
+    os.replace(tmp, am)
+    log(f"✅ moved {moved[0]} binding(s) in actionmaps.xml ({env}): "
+        + ", ".join(f"js{a} → js{b}" for a, b in sorted(perm.items())))
+    log(f"   backup: {bak.name} (next to it) — undo: copy it back over actionmaps.xml with SC closed")
+    save_joy_layout(env, joystick_devices(env))
+    return True
+
 
 
 # ---------------------------------------------------------------- action: KWin windows
@@ -1531,7 +1653,7 @@ def cli():
     if a.diag:
         act_diag(print, a.env)
     if a.joy_order:
-        joy_order_report(print, a.env)
+        joy_report(print, a.env)
     if a.fix_windows:
         act_fix_windows(print, a.screen)
     if a.kwin_rule:
@@ -1893,9 +2015,9 @@ def gui():
             self.screen_box.connect("notify::selected", lambda *_: self._screen_changed())
             row.append(self.screen_box)
             g.attach(row, 0, 2, 2, 1)
-            self._btn(g, 3, 0, "🧭  Joystick order (js1, js2 …)", self._open_joy_order,
-                      "Choose which device is js1, js2 … in Star Citizen. Checked before ▶ Launch; "
-                      "gives the console command that puts the order back.", w=2)
+            self._btn(g, 3, 0, "🧭  Joystick numbers (js1, js2 …)", self._open_joy_numbers,
+                      "Which js number your bindings are for. Warns before ▶ Launch when a device is missing "
+                      "(e.g. OpenDeck not running), and moves the bindings when the numbers change for good.", w=2)
 
             # 5 · Shaders / audio
             g = self._group(right, "5 · Shaders & audio")
@@ -1954,6 +2076,27 @@ def gui():
             return self.launch_btn
 
         def _launch_clicked(self):
+            """Before anything else: a saved joystick that is not connected (e.g. OpenDeck not running
+            for the Idus Button Box) shifts the numbers of the devices after it for this session."""
+            try:
+                st = joy_state(self.env())
+            except Exception:
+                st = {"missing_now": [], "state": "none"}
+            if st["missing_now"]:
+                names = ", ".join(_joy_name(k) for k in st["missing_now"])
+                self.log(f"⚠️  not connected: {names}")
+                self._confirm2(
+                    f"{names} is not connected",
+                    "Star Citizen numbers the joysticks when it starts. Without it, the devices after it get "
+                    "other numbers this session and their bindings point at the wrong device.\n\n"
+                    "Start OpenDeck (for the Idus Button Box) or plug the device in, then press ▶ Launch again.",
+                    "Launch anyway", self._launch_go)
+                return
+            if st["state"] == "moved":
+                joy_report(self.log, self.env(), st)
+            self._launch_go()
+
+        def _launch_go(self):
             if game_running():
                 self._confirm("Star Citizen is running.\n\nLaunch closes it first. Continue?",
                               self._launch_check)
@@ -1975,7 +2118,6 @@ def gui():
             for b in self._buttons:
                 b.set_sensitive(True)
             self.launch_sub.set_label("checks for updates first")
-            self._joy_order_note()
             if latest and inst and vtuple(latest) > vtuple(inst):
                 patch_ok = launch_sh_has_patch()
                 dlg = Gtk.AlertDialog()
@@ -2228,156 +2370,181 @@ def gui():
                     "text/plain;charset=utf-8", GLib.Bytes.new(text.encode())))
             self.log(f"✅ {what} copied")
 
-        def _joy_order_note(self):
-            """Before ▶ Launch: say so when SC's joystick order differs from the one you chose."""
-            try:
-                st = joy_order_state(self.env())
-            except Exception:
-                return
-            if st["state"] == "differs":
-                joy_order_report(self.log, self.env(), st)
+        def _confirm2(self, title, detail, yes_label, on_yes):
+            """A warning dialog: Cancel is the default; on_yes runs only on yes_label."""
+            dlg = Gtk.AlertDialog()
+            dlg.set_message(title)
+            dlg.set_detail(detail)
+            dlg.set_buttons(["Cancel", yes_label])
+            dlg.set_default_button(0)
+            dlg.set_cancel_button(0)
 
-        def _open_joy_order(self):
+            def cb(d, res):
+                try:
+                    if d.choose_finish(res) == 1:
+                        on_yes()
+                except Exception:
+                    pass
+            dlg.choose(self, None, cb)
+
+        def _open_joy_numbers(self):
             env = self.env()
-            devs = joystick_devices(env)
-            win = Gtk.Window(title=f"Joystick order · {env}")
+            st = joy_state(env)
+            win = Gtk.Window(title=f"Joystick numbers · {env}")
             win.set_transient_for(self)
             win.set_modal(True)
-            win.set_default_size(sc(660), -1)
+            win.set_default_size(sc(700), -1)
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(12))
             for s in ("top", "bottom", "start", "end"):
                 getattr(box, f"set_margin_{s}")(sc(16))
             win.set_child(box)
-            head = Gtk.Label(label="Which device is js1, js2 … in Star Citizen", xalign=0)
+            head = Gtk.Label(label="Which joystick number your bindings are for", xalign=0)
             head.add_css_class("group-title")
             box.append(head)
             note = Gtk.Label(xalign=0, wrap=True, label=(
-                "Every binding names a number (js2_button5). When a new device — like the Idus Button Box — "
-                "lands between your sticks, a stick moves to another number and its bindings point at the "
-                "wrong device. Put the devices in the order your bindings expect; the Toolbox checks it "
-                "before ▶ Launch."))
+                "Star Citizen numbers joysticks js1, js2 … in the order it finds them at start — you cannot "
+                "choose it — and every binding names a number (js3_button5). When a device is added or "
+                "missing, the devices after it move and their bindings point at the wrong device. The Toolbox "
+                "remembers the numbers your bindings are right for and moves the bindings when the numbers "
+                "change for good."))
             note.add_css_class("group-note")
             box.append(note)
 
-            close_row = Gtk.Box(spacing=sc(8), halign=Gtk.Align.END)
             close_btn = Gtk.Button(label="Close")
             close_btn.connect("clicked", lambda _w: win.close())
-            if not devs:
-                empty = Gtk.Label(xalign=0, wrap=True, label=(
-                    f"No joysticks in actionmaps.xml for {env} yet. Start Star Citizen once with your "
-                    "devices connected (and OpenDeck running for the Idus Button Box), then open this again."))
-                box.append(empty)
-                close_row.append(close_btn)
-                box.append(close_row)
+            if st["state"] == "none":
+                box.append(Gtk.Label(xalign=0, wrap=True, label=(
+                    f"No joysticks in actionmaps.xml for {env} yet. Start Star Citizen once with your devices "
+                    "connected (and OpenDeck running for the Idus Button Box), then open this again.")))
+                row = Gtk.Box(halign=Gtk.Align.END)
+                row.append(close_btn)
+                box.append(row)
                 win.present()
                 return
 
-            by_key = {d["key"]: d for d in devs}
-            keys_now = [d["key"] for d in devs]
-            slots = sorted(d["instance"] for d in devs)
-            ambiguous = len(set(keys_now)) != len(keys_now)
-            start = wanted_joy_order(env) or suggested_order(devs)
-            order = [k for k in dict.fromkeys(start) if k in by_key] + [k for k in keys_now if k not in start]
+            names = connected_input_names()
+            grid = Gtk.Grid(column_spacing=sc(14), row_spacing=sc(6))
+            grid.add_css_class("tile")
+            for c, t in enumerate(("DEVICE", "SC NUMBERED IT", "BINDINGS ARE FOR", "CONNECTED NOW")):
+                lb = Gtk.Label(label=t, xalign=0)
+                lb.add_css_class("tile-label")
+                grid.attach(lb, c, 0, 1, 1)
+            rows = [(d["name"], d["key"], d["instance"]) for d in st["devs"]]
+            rows += [(_joy_name(k), k, None) for k in st["saved"] if k not in {d["key"] for d in st["devs"]}]
+            for i, (name, key, now) in enumerate(rows, start=1):
+                nm = Gtk.Label(label=name + ("  · virtual" if is_virtual_device(name) else ""), xalign=0, hexpand=True)
+                grid.attach(nm, 0, i, 1, 1)
+                n_lbl = Gtk.Label(label=f"js{now}" if now else "—", xalign=0)
+                n_lbl.add_css_class("joy-num")
+                grid.attach(n_lbl, 1, i, 1, 1)
+                was = st["saved"].get(key)
+                if not st["saved"]:
+                    txt, css = "not saved yet", "dot-idle"
+                elif was is None:
+                    txt, css = "new — none yet", "dot-warn"
+                elif now is None:
+                    txt, css = f"js{was} · SC did not see it", "dot-warn"
+                elif was == now:
+                    txt, css = f"✓ js{was}", "dot-ok"
+                else:
+                    txt, css = f"js{was} → must move to js{now}", "dot-warn"
+                b_lbl = Gtk.Label(label=txt, xalign=0)
+                b_lbl.add_css_class(css)
+                grid.attach(b_lbl, 2, i, 1, 1)
+                on = joy_connected(name, names) if names else None
+                c_lbl = Gtk.Label(label="● yes" if on else ("○ no" if on is not None else "?"), xalign=0)
+                c_lbl.add_css_class("dot-ok" if on else "dot-warn")
+                grid.attach(c_lbl, 3, i, 1, 1)
+            box.append(grid)
 
-            listbox = Gtk.Grid(column_spacing=sc(10), row_spacing=sc(6))
-            listbox.add_css_class("tile")
-            box.append(listbox)
             status = Gtk.Label(xalign=0, wrap=True)
             status.add_css_class("tile-value")
             box.append(status)
-            cmd_row = Gtk.Box(spacing=sc(8))
-            cmd = Gtk.Label(xalign=0, selectable=True, hexpand=True)
-            cmd.add_css_class("cmdbox")
-            cmd_row.append(cmd)
-            copy_btn = Gtk.Button(label="Copy")
-            copy_btn.set_valign(Gtk.Align.CENTER)
-            cmd_row.append(copy_btn)
-            box.append(cmd_row)
-            hint = Gtk.Label(xalign=0, wrap=True, label=(
-                "In Star Citizen: open the console with § (left of 1), paste one line, press Enter — one "
-                "line at a time. SC keeps the order until you reset its settings. Start OpenDeck before "
-                "the game so the Idus Button Box is there. Anything you bound while a device sat on the "
-                "wrong number must be bound again."))
-            hint.add_css_class("group-note")
-            box.append(hint)
+            missing = ", ".join(_joy_name(k) for k in st["missing_now"])
+            if st["state"] == "ambiguous":
+                status.set_label("⚠️  Two devices have the same name and GUID — Star Citizen cannot tell them apart.")
+            elif st["state"] == "unset":
+                status.set_label("When your bindings work as they are, save these numbers: ✓ Bindings are right now.")
+            elif st["state"] == "ok":
+                status.set_label("✅  The numbers are the ones your bindings are for.")
+            else:
+                status.set_label("⚠️  Star Citizen numbered the devices differently last session. Was a device just "
+                                 "missing (OpenDeck not running)? Then start it before the game and change nothing. "
+                                 "Added or removed one for good? Move the bindings with the devices:")
+            if missing:
+                warn = Gtk.Label(xalign=0, wrap=True, label=(
+                    f"⚠️  Not connected now: {missing}. Start OpenDeck / plug it in before the game — otherwise "
+                    "Star Citizen numbers the devices after it differently this session."))
+                warn.add_css_class("dot-warn")
+                box.append(warn)
+
+            move_btn = Gtk.Button(label="✍️  Move bindings in actionmaps.xml …")
+            if st["state"] == "moved":
+                cmd_row = Gtk.Box(spacing=sc(8))
+                cmd = Gtk.Label(xalign=0, selectable=True, hexpand=True, label="\n".join(st["cmds"]))
+                cmd.add_css_class("cmdbox")
+                cmd_row.append(cmd)
+                copy_btn = Gtk.Button(label="Copy")
+                copy_btn.set_valign(Gtk.Align.CENTER)
+                copy_btn.connect("clicked", lambda _w: self._copy(cmd.get_label(), "console command"))
+                cmd_row.append(copy_btn)
+                box.append(cmd_row)
+                hint = Gtk.Label(xalign=0, wrap=True, label=(
+                    "Either in the game: console with § (left of 1), one line at a time, Enter — then quit the game "
+                    "and press ✓ Bindings are right now. Or with the game closed: Move bindings in actionmaps.xml "
+                    "(the same change, backup first)."))
+                hint.add_css_class("group-note")
+                box.append(hint)
+                GLib.idle_add(lambda: (cmd.select_region(0, 0), copy_btn.grab_focus(), False)[2])
+                running = game_running()
+                move_btn.set_sensitive(not running)
+                move_btn.set_tooltip_text("Close Star Citizen first" if running else
+                                          "Same change as the console lines; a backup of actionmaps.xml goes next to it")
 
             btns = Gtk.Box(spacing=sc(8))
-            now_btn = Gtk.Button(label="↺  SC's order now")
-            now_btn.set_tooltip_text("Start from the order Star Citizen has saved now")
-            sug_btn = Gtk.Button(label="Sticks first, virtual last")
-            save_btn = Gtk.Button(label="Save my order")
-            save_btn.add_css_class("suggested-action")
-            for b in (now_btn, sug_btn):
-                btns.append(b)
-            spacer = Gtk.Box(hexpand=True)
-            btns.append(spacer)
-            btns.append(save_btn)
+            ok_btn = Gtk.Button(label="✓  Bindings are right now")
+            ok_btn.set_tooltip_text("Remember the numbers Star Citizen used last session as the ones your bindings are for")
+            ok_btn.set_sensitive(st["state"] in ("unset", "moved") or (st["state"] == "ok" and bool(st["new"])))
+            if st["state"] in ("unset",):
+                ok_btn.add_css_class("suggested-action")
+            btns.append(ok_btn)
+            if st["state"] == "moved":
+                btns.append(move_btn)
+            btns.append(Gtk.Box(hexpand=True))
             btns.append(close_btn)
             box.append(btns)
 
-            def render():
-                child = listbox.get_first_child()
-                while child:
-                    nxt = child.get_next_sibling()
-                    listbox.remove(child)
-                    child = nxt
-                for i, k in enumerate(order):
-                    d, to = by_key[k], slots[i]
-                    num = Gtk.Label(label=f"js{to}")
-                    num.add_css_class("joy-num")
-                    listbox.attach(num, 0, i, 1, 1)
-                    name = Gtk.Label(label=d["name"] + ("  · virtual" if is_virtual_device(d["name"]) else ""),
-                                     xalign=0, hexpand=True)
-                    name.set_tooltip_text(d["product"].strip())
-                    listbox.attach(name, 1, i, 1, 1)
-                    same = d["instance"] == to
-                    now = Gtk.Label(label="✓ same in SC" if same else f"SC has it on js{d['instance']}", xalign=0)
-                    now.add_css_class("dot-ok" if same else "dot-warn")
-                    listbox.attach(now, 2, i, 1, 1)
-                    for col, (txt, step) in enumerate((("↑", -1), ("↓", 1))):
-                        b = Gtk.Button(label=txt)
-                        b.add_css_class("btn-small")
-                        b.set_sensitive(0 <= i + step < len(order))
-                        b.connect("clicked", lambda _w, i=i, step=step: move(i, step))
-                        listbox.attach(b, 3 + col, i, 1, 1)
-                st = joy_order_state(env, order)
-                if ambiguous:
-                    status.set_label("⚠️  Two devices have the same name and GUID — Star Citizen cannot tell them apart.")
-                    cmd.set_label("—")
-                    copy_btn.set_sensitive(False)
-                elif st["swaps"]:
-                    status.set_label(f"⚠️  Star Citizen has another order now — {len(st['swaps'])} console "
-                                     f"line{'s' if len(st['swaps']) > 1 else ''} put it like this:")
-                    cmd.set_label("\n".join(st["cmds"]))
-                    copy_btn.set_sensitive(True)
-                else:
-                    status.set_label("✅  Star Citizen has this order already.")
-                    cmd.set_label("nothing to do")
-                    copy_btn.set_sensitive(False)
-                saved = wanted_joy_order(env) == order
-                save_btn.set_label("Saved ✓" if saved else "Save my order")
-                save_btn.set_sensitive(not saved and not ambiguous)
+            def save_now(_w):
+                save_joy_layout(env, st["devs"])
+                self.log(f"✅ joystick numbers saved ({env}) as the ones your bindings are for: "
+                         + ", ".join(f"js{d['instance']} {d['name']}" for d in st["devs"]))
+                win.close()
 
-            def move(i, step):
-                j = i + step
-                order[i], order[j] = order[j], order[i]
-                render()
+            def move(_w):
+                lines = [f"{d['name']}: js{was} → js{now}" for d, was, now in st["moved"]]
+                lines += [f"{d['name']} (new): js{d['instance']}" for d in st["new"]]
+                perm = dict(st["perm"])
 
-            def reset_to(keys):
-                order[:] = keys
-                render()
+                def second():
+                    self._confirm2(
+                        "Last check — move the bindings now?",
+                        "Do this only when the numbers changed for good (a device added or removed).\n\n"
+                        "If a device was just missing — OpenDeck not running when the game started — cancel, "
+                        "and start it before the game next time instead. Moving the bindings then would "
+                        "put them on the wrong numbers.",
+                        "Move bindings",
+                        lambda: (win.close(), self._run(act_joy_move_bindings, env, perm)))
 
-            def save(_w):
-                save_joy_order(env, order)
-                self.log(f"✅ joystick order saved ({env}): "
-                         + ", ".join(f"js{slots[i]} {by_key[k]['name']}" for i, k in enumerate(order)))
-                render()
+                self._confirm2(
+                    "Move the bindings in actionmaps.xml?",
+                    "\n".join(lines) + "\n\nEvery binding and per-device setting (invert, curves) on these numbers "
+                    "moves with its device — the same change as the console line"
+                    f"{'s' if len(st['cmds']) > 1 else ''}:\n" + "\n".join(st["cmds"]) +
+                    "\n\nStar Citizen must stay closed. A backup of actionmaps.xml goes next to it first.",
+                    "Continue …", second)
 
-            now_btn.connect("clicked", lambda _w: reset_to(list(keys_now)))
-            sug_btn.connect("clicked", lambda _w: reset_to(suggested_order(devs)))
-            save_btn.connect("clicked", save)
-            copy_btn.connect("clicked", lambda _w: self._copy(cmd.get_label(), "console command"))
-            render()
+            ok_btn.connect("clicked", save_now)
+            move_btn.connect("clicked", move)
             win.present()
 
         def _open_vram(self):
