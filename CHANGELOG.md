@@ -3,6 +3,16 @@
 All notable changes to Idus SC Toolbox are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) · Versioning: `vMAJOR.MINOR`, plus `.PATCH` for look-and-fix releases.
 
+## [1.4] - 2026-11-20
+
+### Added
+- 🧭 **Joystick order (js1, js2 …)** — choose which device is js1, js2 … (↑ ↓, or "sticks first,
+  virtual last"). The window shows where Star Citizen has each device now and the console line
+  that puts it back (`pp_resortdevices joystick 3 2`) with a Copy button. Made for the
+  Idus Button Box, a virtual joystick that can land between your sticks and shift their numbers.
+- Joystick diagnostics and ▶ Launch say when Star Citizen's order differs from the one you chose,
+  and give the console lines. CLI: `--joy-order`.
+
 ## [1.3.7] - 2026-11-06
 
 ### Changed

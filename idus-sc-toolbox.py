@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ─────────────────────────────────────────────────────────────────────────────
-#  Idus SC Toolbox  ·  v1.3.7  ·  build 2026-11-06
+#  Idus SC Toolbox  ·  v1.4  ·  build 2026-11-20
 #  (bump APP_VERSION + BUILD below and this line together on every update)
 # ─────────────────────────────────────────────────────────────────────────────
 """
@@ -17,6 +17,7 @@ GUI launches with no arguments. Same actions via CLI (KDE shortcuts / Stream Dec
   idus-sc-toolbox --backup          Back up config/keybinds (all environments)
   idus-sc-toolbox --restore [FILE]  Restore from backup (no FILE: latest). Safety copy first.
   idus-sc-toolbox --diag            Joystick diagnostics (OS devices, duplicates, what SC expects)
+  idus-sc-toolbox --joy-order       Joystick order (js1, js2 …) against the one you chose + console fix
   idus-sc-toolbox --fix-windows     Move launcher to centre + SC to main screen (one-shot, KWin)
   idus-sc-toolbox --kwin-rule       Always open launcher + SC on the main screen (permanent KWin script)
   idus-sc-toolbox --kwin-remove     Remove that KWin script again
@@ -49,8 +50,8 @@ import zipfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- configuration
-APP_VERSION = "1.3.7"
-BUILD = "2026-11-06"  # keep in sync with the header comment at the top of this file
+APP_VERSION = "1.4"
+BUILD = "2026-11-20"  # keep in sync with the header comment at the top of this file
 PREFIX = Path(os.environ.get("SC_PREFIX", Path.home() / "Games/star-citizen"))
 BACKUP_DIR = Path(os.environ.get("SC_BACKUP_DIR", Path.home() / "SC-backups"))
 KEEP_BACKUPS = 15
@@ -713,7 +714,140 @@ def act_diag(log, env="LIVE"):
             log(f"· SC ({env}): no joystick instances in actionmaps.xml")
     else:
         log(f"· no actionmaps.xml found for {env}")
+    joy_order_report(log, env)
     log("— end —")
+
+
+# ---------------------------------------------------------------- joystick order (js1, js2 …)
+# Star Citizen numbers joysticks js1, js2 … and every binding names its number (js2_button5).
+# A new device — e.g. the Idus Button Box from OpenDeck — can land between your sticks, so a
+# stick moves from js2 to js3 and its bindings point at the wrong device. You choose the order
+# once (settings: joystick_order[env] = Product strings); the Toolbox checks it against what SC
+# saved in actionmaps.xml and gives the console commands that put it back
+# (pp_resortdevices joystick <now> <wanted>).
+JS_OPTIONS_RE = re.compile(r'<options\b[^>]*\btype="joystick"[^>]*>')
+VIRTUAL_DEVICE_HINTS = ("idus button box", "vjoy", "virtual")
+
+
+def _xml_unescape(s: str) -> str:
+    return (s.replace("&quot;", '"').replace("&apos;", "'").replace("&lt;", "<")
+             .replace("&gt;", ">").replace("&amp;", "&"))
+
+
+def joy_key(product: str) -> str:
+    """One device across runs: its Product string (name + GUID) with spaces normalised."""
+    return " ".join(product.split())
+
+
+def joystick_devices(env="LIVE") -> list:
+    """Joysticks SC has in actionmaps.xml, by instance: [{instance, product, key, name, guid}]."""
+    am = profile_file(env, "actionmaps.xml")
+    if not am or not am.is_file():
+        return []
+    out = []
+    for tag in JS_OPTIONS_RE.findall(am.read_text(errors="ignore")):
+        inst = re.search(r'\binstance="(\d+)"', tag)
+        prod = re.search(r'\bProduct="([^"]*)"', tag)
+        if not inst or not prod or not prod.group(1).strip():
+            continue
+        p = _xml_unescape(prod.group(1))
+        m = re.match(r"\s*(.*?)\s*(\{[0-9A-Fa-f-]+\})?\s*$", p)
+        name = (m.group(1) if m else "").strip() or p.strip()
+        out.append(dict(instance=int(inst.group(1)), product=p, key=joy_key(p), name=name,
+                        guid=(m.group(2) or "") if m else ""))
+    return sorted(out, key=lambda d: d["instance"])
+
+
+def is_virtual_device(name: str) -> bool:
+    low = name.lower()
+    return any(h in low for h in VIRTUAL_DEVICE_HINTS)
+
+
+def suggested_order(devs: list) -> list:
+    """Real sticks and throttles first (in SC's current order), virtual devices last."""
+    return ([d["key"] for d in devs if not is_virtual_device(d["name"])]
+            + [d["key"] for d in devs if is_virtual_device(d["name"])])
+
+
+def wanted_joy_order(env="LIVE", settings=None) -> list:
+    s = settings if settings is not None else load_settings()
+    return list((s.get("joystick_order") or {}).get(env) or [])
+
+
+def save_joy_order(env: str, keys: list):
+    s = load_settings()
+    s.setdefault("joystick_order", {})[env] = list(keys)
+    save_settings(s)
+
+
+def joy_order_plan(devs: list, wanted: list):
+    """Where each device should be and the swaps that get it there.
+    Wanted devices first in your order, then devices you have not placed (in SC's order); they
+    share the instance numbers SC uses now. Returns (target {key: instance}, swaps [(now, to)]),
+    or (None, None) when two devices have the same Product string (SC cannot tell them apart)."""
+    keys = [d["key"] for d in devs]
+    if len(set(keys)) != len(keys):
+        return None, None
+    order = [k for k in dict.fromkeys(wanted) if k in keys] + [k for k in keys if k not in wanted]
+    slots = sorted(d["instance"] for d in devs)
+    target = {k: slots[i] for i, k in enumerate(order)}
+    pos = {d["key"]: d["instance"] for d in devs}
+    at = {d["instance"]: d["key"] for d in devs}
+    swaps = []
+    for k in order:
+        want, cur = target[k], pos[k]
+        if cur != want:
+            other = at[want]
+            swaps.append((cur, want))
+            pos[k], pos[other] = want, cur
+            at[want], at[cur] = k, other
+    return target, swaps
+
+
+def resort_commands(swaps) -> list:
+    return [f"pp_resortdevices joystick {a} {b}" for a, b in swaps]
+
+
+def joy_order_state(env="LIVE", wanted=None) -> dict:
+    """state: ok | differs | unset | none | ambiguous — plus devices, target and console commands."""
+    devs = joystick_devices(env)
+    if wanted is None:
+        wanted = wanted_joy_order(env)
+    if not devs:
+        return dict(state="none", devs=[], target={}, swaps=[], cmds=[], wanted=wanted)
+    target, swaps = joy_order_plan(devs, wanted or suggested_order(devs))
+    if target is None:
+        return dict(state="ambiguous", devs=devs, target={}, swaps=[], cmds=[], wanted=wanted)
+    state = "unset" if not wanted else ("ok" if not swaps else "differs")
+    return dict(state=state, devs=devs, target=target, swaps=swaps, cmds=resort_commands(swaps), wanted=wanted)
+
+
+def joy_order_report(log, env="LIVE", st=None):
+    st = st or joy_order_state(env)
+    if st["state"] == "none":
+        return
+    if st["state"] == "ambiguous":
+        log("· joystick order: two devices have the same name and GUID — SC cannot tell them apart")
+        return
+    if st["state"] == "unset":
+        log("· joystick order: not chosen yet — 🧭 Joystick order (suggestion: sticks first, "
+            "virtual devices like the Idus Button Box last)")
+        if st["swaps"]:
+            moves = [f"{d['name']} js{d['instance']}→js{st['target'][d['key']]}"
+                     for d in st["devs"] if st["target"][d["key"]] != d["instance"]]
+            log("  with the suggestion: " + ", ".join(moves))
+        return
+    if st["state"] == "ok":
+        log(f"✅ joystick order as you chose it: " + ", ".join(f"js{d['instance']} {d['name']}" for d in st["devs"]))
+        return
+    log("⚠️  joystick order differs from your choice — bindings point at the wrong device:")
+    for d in st["devs"]:
+        to = st["target"][d["key"]]
+        if to != d["instance"]:
+            log(f"    {d['name']}: js{d['instance']} now, should be js{to}")
+    log("  Fix in Star Citizen: console (§), one line at a time:")
+    for c in st["cmds"]:
+        log(f"    {c}")
 
 
 # ---------------------------------------------------------------- action: KWin windows
@@ -1366,6 +1500,7 @@ def cli():
     ap.add_argument("--backup", action="store_true")
     ap.add_argument("--restore", nargs="?", const="__latest__", metavar="FILE")
     ap.add_argument("--diag", action="store_true")
+    ap.add_argument("--joy-order", action="store_true")
     ap.add_argument("--fix-windows", action="store_true")
     ap.add_argument("--kwin-rule", action="store_true")
     ap.add_argument("--kwin-remove", action="store_true")
@@ -1377,7 +1512,7 @@ def cli():
     ap.add_argument("--env", default="LIVE")
     ap.add_argument("--screen", default=None, help="main screen: KWin index or name, e.g. HDMI-A-1")
     a = ap.parse_args()
-    triggers = [a.status, a.launch, a.kill, a.restart, a.restart_patch, a.backup, a.restore is not None, a.diag,
+    triggers = [a.status, a.launch, a.kill, a.restart, a.restart_patch, a.backup, a.restore is not None, a.diag, a.joy_order,
                 a.fix_windows, a.kwin_rule, a.kwin_remove, a.shaders, a.starstrings, a.vram, a.quantum]
     if not any(triggers):
         return False
@@ -1395,6 +1530,8 @@ def cli():
         act_restore(print, None if a.restore == "__latest__" else a.restore)
     if a.diag:
         act_diag(print, a.env)
+    if a.joy_order:
+        joy_order_report(print, a.env)
     if a.fix_windows:
         act_fix_windows(print, a.screen)
     if a.kwin_rule:
@@ -1756,6 +1893,9 @@ def gui():
             self.screen_box.connect("notify::selected", lambda *_: self._screen_changed())
             row.append(self.screen_box)
             g.attach(row, 0, 2, 2, 1)
+            self._btn(g, 3, 0, "🧭  Joystick order (js1, js2 …)", self._open_joy_order,
+                      "Choose which device is js1, js2 … in Star Citizen. Checked before ▶ Launch; "
+                      "gives the console command that puts the order back.", w=2)
 
             # 5 · Shaders / audio
             g = self._group(right, "5 · Shaders & audio")
@@ -1835,6 +1975,7 @@ def gui():
             for b in self._buttons:
                 b.set_sensitive(True)
             self.launch_sub.set_label("checks for updates first")
+            self._joy_order_note()
             if latest and inst and vtuple(latest) > vtuple(inst):
                 patch_ok = launch_sh_has_patch()
                 dlg = Gtk.AlertDialog()
@@ -2076,6 +2217,169 @@ def gui():
                 self.backup_note.set_label("No backups yet")
             return False
 
+        def _copy(self, text, what):
+            """Text to the clipboard (GTK4), with a line in the log."""
+            from gi.repository import Gdk
+            cb = self.get_clipboard()
+            try:
+                cb.set(text)
+            except Exception:
+                cb.set_content(Gdk.ContentProvider.new_for_bytes(
+                    "text/plain;charset=utf-8", GLib.Bytes.new(text.encode())))
+            self.log(f"✅ {what} copied")
+
+        def _joy_order_note(self):
+            """Before ▶ Launch: say so when SC's joystick order differs from the one you chose."""
+            try:
+                st = joy_order_state(self.env())
+            except Exception:
+                return
+            if st["state"] == "differs":
+                joy_order_report(self.log, self.env(), st)
+
+        def _open_joy_order(self):
+            env = self.env()
+            devs = joystick_devices(env)
+            win = Gtk.Window(title=f"Joystick order · {env}")
+            win.set_transient_for(self)
+            win.set_modal(True)
+            win.set_default_size(sc(660), -1)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=sc(12))
+            for s in ("top", "bottom", "start", "end"):
+                getattr(box, f"set_margin_{s}")(sc(16))
+            win.set_child(box)
+            head = Gtk.Label(label="Which device is js1, js2 … in Star Citizen", xalign=0)
+            head.add_css_class("group-title")
+            box.append(head)
+            note = Gtk.Label(xalign=0, wrap=True, label=(
+                "Every binding names a number (js2_button5). When a new device — like the Idus Button Box — "
+                "lands between your sticks, a stick moves to another number and its bindings point at the "
+                "wrong device. Put the devices in the order your bindings expect; the Toolbox checks it "
+                "before ▶ Launch."))
+            note.add_css_class("group-note")
+            box.append(note)
+
+            close_row = Gtk.Box(spacing=sc(8), halign=Gtk.Align.END)
+            close_btn = Gtk.Button(label="Close")
+            close_btn.connect("clicked", lambda _w: win.close())
+            if not devs:
+                empty = Gtk.Label(xalign=0, wrap=True, label=(
+                    f"No joysticks in actionmaps.xml for {env} yet. Start Star Citizen once with your "
+                    "devices connected (and OpenDeck running for the Idus Button Box), then open this again."))
+                box.append(empty)
+                close_row.append(close_btn)
+                box.append(close_row)
+                win.present()
+                return
+
+            by_key = {d["key"]: d for d in devs}
+            keys_now = [d["key"] for d in devs]
+            slots = sorted(d["instance"] for d in devs)
+            ambiguous = len(set(keys_now)) != len(keys_now)
+            start = wanted_joy_order(env) or suggested_order(devs)
+            order = [k for k in dict.fromkeys(start) if k in by_key] + [k for k in keys_now if k not in start]
+
+            listbox = Gtk.Grid(column_spacing=sc(10), row_spacing=sc(6))
+            listbox.add_css_class("tile")
+            box.append(listbox)
+            status = Gtk.Label(xalign=0, wrap=True)
+            status.add_css_class("tile-value")
+            box.append(status)
+            cmd_row = Gtk.Box(spacing=sc(8))
+            cmd = Gtk.Label(xalign=0, selectable=True, hexpand=True)
+            cmd.add_css_class("cmdbox")
+            cmd_row.append(cmd)
+            copy_btn = Gtk.Button(label="Copy")
+            copy_btn.set_valign(Gtk.Align.CENTER)
+            cmd_row.append(copy_btn)
+            box.append(cmd_row)
+            hint = Gtk.Label(xalign=0, wrap=True, label=(
+                "In Star Citizen: open the console with § (left of 1), paste one line, press Enter — one "
+                "line at a time. SC keeps the order until you reset its settings. Start OpenDeck before "
+                "the game so the Idus Button Box is there. Anything you bound while a device sat on the "
+                "wrong number must be bound again."))
+            hint.add_css_class("group-note")
+            box.append(hint)
+
+            btns = Gtk.Box(spacing=sc(8))
+            now_btn = Gtk.Button(label="↺  SC's order now")
+            now_btn.set_tooltip_text("Start from the order Star Citizen has saved now")
+            sug_btn = Gtk.Button(label="Sticks first, virtual last")
+            save_btn = Gtk.Button(label="Save my order")
+            save_btn.add_css_class("suggested-action")
+            for b in (now_btn, sug_btn):
+                btns.append(b)
+            spacer = Gtk.Box(hexpand=True)
+            btns.append(spacer)
+            btns.append(save_btn)
+            btns.append(close_btn)
+            box.append(btns)
+
+            def render():
+                child = listbox.get_first_child()
+                while child:
+                    nxt = child.get_next_sibling()
+                    listbox.remove(child)
+                    child = nxt
+                for i, k in enumerate(order):
+                    d, to = by_key[k], slots[i]
+                    num = Gtk.Label(label=f"js{to}")
+                    num.add_css_class("joy-num")
+                    listbox.attach(num, 0, i, 1, 1)
+                    name = Gtk.Label(label=d["name"] + ("  · virtual" if is_virtual_device(d["name"]) else ""),
+                                     xalign=0, hexpand=True)
+                    name.set_tooltip_text(d["product"].strip())
+                    listbox.attach(name, 1, i, 1, 1)
+                    same = d["instance"] == to
+                    now = Gtk.Label(label="✓ same in SC" if same else f"SC has it on js{d['instance']}", xalign=0)
+                    now.add_css_class("dot-ok" if same else "dot-warn")
+                    listbox.attach(now, 2, i, 1, 1)
+                    for col, (txt, step) in enumerate((("↑", -1), ("↓", 1))):
+                        b = Gtk.Button(label=txt)
+                        b.add_css_class("btn-small")
+                        b.set_sensitive(0 <= i + step < len(order))
+                        b.connect("clicked", lambda _w, i=i, step=step: move(i, step))
+                        listbox.attach(b, 3 + col, i, 1, 1)
+                st = joy_order_state(env, order)
+                if ambiguous:
+                    status.set_label("⚠️  Two devices have the same name and GUID — Star Citizen cannot tell them apart.")
+                    cmd.set_label("—")
+                    copy_btn.set_sensitive(False)
+                elif st["swaps"]:
+                    status.set_label(f"⚠️  Star Citizen has another order now — {len(st['swaps'])} console "
+                                     f"line{'s' if len(st['swaps']) > 1 else ''} put it like this:")
+                    cmd.set_label("\n".join(st["cmds"]))
+                    copy_btn.set_sensitive(True)
+                else:
+                    status.set_label("✅  Star Citizen has this order already.")
+                    cmd.set_label("nothing to do")
+                    copy_btn.set_sensitive(False)
+                saved = wanted_joy_order(env) == order
+                save_btn.set_label("Saved ✓" if saved else "Save my order")
+                save_btn.set_sensitive(not saved and not ambiguous)
+
+            def move(i, step):
+                j = i + step
+                order[i], order[j] = order[j], order[i]
+                render()
+
+            def reset_to(keys):
+                order[:] = keys
+                render()
+
+            def save(_w):
+                save_joy_order(env, order)
+                self.log(f"✅ joystick order saved ({env}): "
+                         + ", ".join(f"js{slots[i]} {by_key[k]['name']}" for i, k in enumerate(order)))
+                render()
+
+            now_btn.connect("clicked", lambda _w: reset_to(list(keys_now)))
+            sug_btn.connect("clicked", lambda _w: reset_to(suggested_order(devs)))
+            save_btn.connect("clicked", save)
+            copy_btn.connect("clicked", lambda _w: self._copy(cmd.get_label(), "console command"))
+            render()
+            win.present()
+
         def _open_vram(self):
             win = Gtk.Window(title="VRAM Check")
             win.set_transient_for(self)
@@ -2293,6 +2597,9 @@ def gui():
             progressbar.tile-bar progress {{ min-height: {sc(6)}px; border-radius: {sc(3)}px; background-color: {C['soft']}; }}
             progressbar.tile-bar.level-warn progress {{ background-color: {C['warn']}; }}
             .group-note {{ font-size: {int(11.5*S)}px; color: {C['muted']}; }}
+            .joy-num {{ font-family: {MONO}; font-weight: 600; color: {C['accent']}; min-width: {sc(34)}px; }}
+            .cmdbox {{ font-family: {MONO}; font-size: {int(12.5*S)}px; color: {C['fg']}; background-color: {C['deep']};
+                       border: 1px solid {C['line']}; border-radius: {sc(8)}px; padding: {sc(8)}px {sc(10)}px; }}
             button.btn-small {{ padding: {sc(4)}px {sc(10)}px; font-size: {int(12*S)}px; }}
             button.active {{ border-color: {C['accent']}; color: {C['title']}; }}
             progressbar.vram-inline trough {{ min-height: {sc(10)}px; border-radius: {sc(5)}px;

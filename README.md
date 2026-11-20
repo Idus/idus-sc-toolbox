@@ -106,7 +106,8 @@ The panel refreshes after every action and with **⟳ Refresh**.
 | Backup | Back up now | Tars `user/` (keybinds, attributes), USER.cfg, sc-launch.sh → `~/SC-backups`. The group shows when the last backup was taken |
 | | Restore latest backup | Safety-copies current state, then unpacks the latest backup |
 | | Auto-backup on launch | Takes one backup per day when the app starts |
-| Joystick & windows | Joystick diagnostics | Lists devices, flags duplicate instances, shows what SC expects |
+| Joystick & windows | Joystick diagnostics | Lists devices, flags duplicate instances, shows what SC expects — and whether the joystick order is the one you chose |
+| | Joystick order (js1, js2 …) | Choose which device is js1, js2 … (↑ ↓; suggestion: sticks first, virtual devices like the [Idus Button Box](https://github.com/Idus/idus-button-box) last). Shows where Star Citizen has them now and the console line that puts them back (`pp_resortdevices joystick 3 2`, with a Copy button). ▶ Launch warns when the order is off. [More below](#joystick-order)
 | | Fix windows now | One-shot: centre launcher + SC to main screen (KWin) |
 | | Always on main screen | Installs a small KWin script: the launcher and SC open on the main screen every time (also with Wayland runners, wherever the mouse is). Switch off in System Settings → KWin Scripts or with `--kwin-remove` |
 | | Main screen | Which screen counts as the main one. Default: the screen KDE calls primary. Screens are tracked by name (e.g. `HDMI-A-1`), because KWin's own numbering is neither left to right nor primary first |
@@ -122,13 +123,33 @@ Every action has a flag, for KDE global shortcuts or a Stream Deck:
 
 ```bash
 idus-sc-toolbox --launch | --status | --kill | --restart | --restart-patch | --fix-windows \
-                --backup | --restore | --diag | --starstrings | --vram | --kwin-rule | --kwin-remove \
+                --backup | --restore | --diag | --joy-order | --starstrings | --vram | --kwin-rule | --kwin-remove \
                 --shaders [--driver-cache] | --quantum on|off | --env PTU | --screen N
 ```
 
 `--launch` does the same check as the ▶ button, without asking: a newer launcher starts in
 patch mode. Right-clicking the Toolbox in the start menu offers **▶ Launch** and
 **🩹 Patch / verify launcher** too, so you can use it as your Star Citizen shortcut.
+
+## Joystick order
+
+Star Citizen numbers joysticks js1, js2 … and every binding names the number (`js2_button5`).
+When a new device appears — a virtual one like the Idus Button Box, or a stick on another USB
+port — it can land between your sticks: the left stick moves from js2 to js3 and its bindings
+point at the wrong device.
+
+**🧭 Joystick order** lists the devices Star Citizen saved in `actionmaps.xml`. Put them in the
+order your bindings expect and **Save my order**. From then on, Joystick diagnostics and ▶ Launch
+compare it with what Star Citizen saved after the last session and give the fix: one or more
+console lines (`§` in the game, one line at a time), e.g.
+
+```
+pp_resortdevices joystick 3 2
+```
+
+Star Citizen keeps the order until you reset its settings. Anything you bound while a device sat
+on the wrong number must be bound again. Start OpenDeck before the game, so the Idus Button Box
+is there when Star Citizen looks for devices.
 
 ## Patch mode (two runners)
 
